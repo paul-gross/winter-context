@@ -28,13 +28,17 @@ tools/winter-cli/src/winter_cli/
 │   │   ├── handlers/              # CLI-shaped output formatting + arg parsing
 │   │   │   ├── init_handler.py        # `winter ws init`
 │   │   │   ├── destroy_handler.py     # `winter ws destroy`
+│   │   │   ├── restack_handler.py     # `winter ws restack` — its own file because it plans then
+│   │   │   │                          #   executes through two separate services (see below), not
+│   │   │   │                          #   the single omnibus service every other row here shares
 │   │   │   ├── workspace_handler.py   # every other `winter ws *` surface (list, status, connect,
 │   │   │   │                          #   disconnect, checkout, reset, clean, fetch, pull, push,
 │   │   │   │                          #   merge, update, prune, index, diff, worktrees) — an open
 │   │   │   │                          #   list; a new `ws` verb lands here unless it earns its own file
 │   │   │   └── repo_handler.py        # `winter repo {list,add,remove}`
 │   │   ├── *_service.py           # domain orchestration (init / destroy / workspace (omnibus) /
-│   │   │                          #   prune / env checkout / env reset / env clean / sync / push / merge)
+│   │   │                          #   prune / env checkout / env reset / env clean / sync / push / merge /
+│   │   │                          #   env_restack_plan (read-only planning) / env_restack (execution))
 │   │   ├── *_reporter.py          # stream / json reporters for lifecycle events
 │   │   ├── reporter_factory.py    # picks stream-vs-json reporter from --json flag
 │   │   ├── repository_factory.py  # builds per-repo IWriteRepoRepository instances
@@ -66,11 +70,20 @@ The layout instantiates the `winter-context:/architecture/*.md` rules at once:
 ## Handlers: flat vs. subpackage
 
 `modules/workspace/` outgrew a single `handler.py` and split into a `handlers/` subpackage organized by CLI surface
-(init, destroy, the workspace omnibus, repo). The split rule: keep a flat `handler.py` while a feature has one cohesive
-handler; promote to `handlers/<surface>_handler.py` files when distinct CLI surfaces start sharing little code.
+(init, destroy, restack, the workspace omnibus, repo). The split rule: keep a flat `handler.py` while a feature has one
+cohesive handler; promote to `handlers/<surface>_handler.py` files when distinct CLI surfaces start sharing little code.
 Re-export the handler classes from `handlers/__init__.py` so callers import from the subpackage root.
 
 `./module-layout.md` shows the flat form as the default. This exemplar is the canonical reference for the split form.
+
+**Declared exception:** `restack_handler.py` is the first `ws` verb to earn its own file *and* its own pair of services
+(`env_restack_plan_service.py`, `env_restack_service.py`) rather than extending `workspace_handler.py` /
+`WorkspaceService`. The split is a property of the domain, not just file size: planning (read-only, refuses before any
+mutation) and execution (write-capable, resolves each `--onto` target and `up-to-date` verdict fresh at run time) are
+different collaborators with different seams (`IReadRepoRepository` vs. `IWriteRepoRepository`), so `RestackHandler`
+takes both services directly instead of routing through the omnibus. Follow this precedent — plan/execute services, plus
+a dedicated handler — for any future `ws` verb whose pre-flight validation and mutation genuinely need to reason about
+state at two different times, rather than folding it into the omnibus by default.
 
 ## Argument conventions
 
@@ -95,6 +108,9 @@ single-worktree, and cross-env selection; a parallel flag fractures the surface 
 `winter ws status` / `winter ws pull` (`[PATTERNS]...`, defaulting to all) for read-shaped commands; match
 `winter ws merge` (a leading required positional like `SOURCE_REF`, then `[PATTERNS]...` with no implicit "all" default)
 when an action needs an explicit target.
+
+**Declared exception:** `winter ws restack`'s positionals are an ordered chain of literal env names, never a glob — see
+`workspace:/context/winter-cli/usage/ws/patterns.md#winter-ws-restack--ordered-literal-chain-not-patterns`.
 
 Reserve `--flags` for *modifiers* on the selected set, not for selection itself — `--json`, `--standalone`, `--all`,
 `--exclude-pinned`, `--rebase`. The positional answers *which worktrees*; flags answer *how to act on them*.
