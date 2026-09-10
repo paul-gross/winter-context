@@ -141,13 +141,13 @@ class WriteFooRepository:
 The factory has one `from_<transport>(exc, message, *, cwd)` method per underlying exception type it knows how to
 translate — `from_git` for `git.GitCommandError`, `from_subprocess` for `subprocess.CompletedProcess`, `from_io` for a
 generic IO library, etc. Each method extracts the structured fields (`subcommand`, `cmd_args`, `exit_code`, `stderr`)
-off the exception itself; callers pass only the high-level `message`. Production winter-cli currently exposes only
-`from_git`.
+off the exception itself; callers pass only the high-level `message`.
 
 `RepoError` itself becomes a dataclass-shaped exception carrying those fields, not just a message string. See
 `winter-context:/exemplars/python/repo_pattern.py` for the full example, and
 `winter:/tools/winter-cli/src/winter_cli/modules/workspace/internal/repo_error_factory.py` for the production factory in
-winter-cli (which wraps `git.GitCommandError`, `subprocess.CalledProcessError`, and other transport-level exceptions).
+winter-cli (which wraps `git.GitCommandError` via `from_git`, a completed `subprocess` run via `from_subprocess`, and
+anything else through the catch-all `from_exception`).
 
 The factory is also where the **log-once-at-the-wrap-site** rule is enforced: it emits a single ERROR record with the
 structured fields before returning the wrapped exception. See `../standards/logging.md` for level conventions and why

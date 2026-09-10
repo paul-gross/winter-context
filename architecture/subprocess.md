@@ -9,6 +9,20 @@
   `./error-handling.md`). Capture `subcommand`, `cmd_args`, `cwd`, `exit_code`, and `stderr` as structured fields, not
   as a concatenated message.
 - Never `shell=True` for any command whose tokens come from a variable. Pass `cmd` as a `list[str]`.
+- **Bounded exception** — a feature may let workspace configuration opt an entry into `shell=True`, per entry, when the
+  command's tokens are text the operator wrote into that entry. The bound this opt-in actually enforces is narrower than
+  "safe from command-derived values": it refuses, at resolution time, an entry whose `command` string contains a
+  `${...}` reference to a command-derived key — naming the entry and the reference rather than running it. That refusal
+  covers only the `${...}` substitution grammar. The process such an entry starts still receives the scope *visible to
+  that entry* as its own environment, overlaid on winter's inherited environment — the full accumulated scope for a
+  feature- or named-band entry (so any command-derived key already in that scope travels with it, as ordinary env vars),
+  but only the restricted workspace-band view for a workspace-band one, which excludes every feature- or named-band key
+  regardless of origin. `shell=True` hands the whole command line to a real shell, which performs its own
+  environment-variable expansion independent of winter's `${...}` grammar — a declared command like `foo $DB_PASSWORD`
+  reaches the shell with a command-derived value expanded into it wherever `$DB_PASSWORD` is in the entry's visible
+  scope. A feature taking this opt-in accepts that residual surface, exactly as broad as the `${...}` refusal leaves it
+  for a feature- or named-band entry; document it alongside the opt-in rather than presenting the `${...}` refusal as
+  closing it.
 
 ## Why
 
@@ -21,6 +35,17 @@ subprocesses are a different shape — use the `ISubprocessRunner.popen` seam, n
 
 `shell=True` with variable inputs is a command-injection footgun. The list form is safe by default and indistinguishable
 in cost.
+
+Workspace configuration the operator wrote is not the untrusted variable that rule guards against — it's text the
+operator typed into a file they control, the same trust level as the code they'd otherwise write by hand. A value a
+command produced is different in origin — data a prior invocation returned — so the opt-in refuses letting the
+*operator's own declared command line* reach for one by name via `${...}`. It cannot also keep that value out of the
+child process's environment: the entry needs its own visible scope to resolve its own `${...}` tokens, and any
+command-derived key already in *that* scope travels with it — the full accumulated scope for a feature- or named-band
+entry, but only the restricted workspace-band view for a workspace-band one, where no feature- or named-band key
+(command-derived or not) is ever present to travel. A `shell=True` entry's shell can still read and expand a
+command-derived value through ordinary shell syntax (`$NAME`, `` `cmd` ``, etc.) — that surface is accepted, not closed,
+by the `${...}`-only refusal above.
 
 ## Do
 
@@ -44,8 +69,8 @@ The factory extracts `subcommand`, `cmd_args`, `exit_code`, and `stderr` off `co
 only the high-level `message` and don't repeat the extraction at every wrap site.
 
 **Method-name convention:** the factory has one method per underlying transport — `from_git` for `git.GitCommandError`,
-`from_subprocess` for `subprocess.CompletedProcess`, and so on. Production winter-cli currently exposes only `from_git`;
-`from_subprocess` is the canonical shape for new adapters that wrap raw `subprocess`.
+`from_subprocess` for `subprocess.CompletedProcess`, and so on. `from_subprocess` is the canonical shape for an adapter
+that wraps raw `subprocess`.
 
 ## Don't
 
@@ -69,4 +94,4 @@ subprocess.run(["git", "fetch", remote], cwd=cwd)
 - `winter:/tools/winter-cli/src/winter_cli/core/internal/local_subprocess_runner.py` — the production
   `ISubprocessRunner` adapter (`run` + `popen` seams).
 - `winter:/tools/winter-cli/src/winter_cli/modules/workspace/internal/repo_error_factory.py` — the production wrapping
-  factory. Currently implements `from_git` only; `from_subprocess` is the canonical shape for new adapters.
+  factory, implementing `from_git`, `from_subprocess`, and the catch-all `from_exception`.
