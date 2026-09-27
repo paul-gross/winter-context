@@ -49,16 +49,10 @@ authoritative schemas, precedence, merge rules, and validation table.
 A resolved workspace effort projects to `effort` for Claude Code, `model_reasoning_effort` for Codex, and
 `reasoningEffort` for OpenCode.
 
-A built-in tier resolves to a per-vendor id — one representative row:
-
-| Tier   | Claude | Codex     | OpenCode                           |
-| ------ | ------ | --------- | ---------------------------------- |
-| `opus` | `opus` | `gpt-5.4` | `anthropic/claude-opus-4-20250514` |
-
-The full table is defined once in
+A built-in tier resolves to a per-vendor id. The table is defined once in
 `winter:/tools/winter-cli/src/winter_cli/modules/workspace/agent_transform/model_tiers.py` (`MODEL_TIER_IDS`) — read the
-id set there rather than mirroring it here. Claude accepts the tier alias directly; the Codex and OpenCode ids are
-pinned against vendor documentation.
+id set there, or run `winter agents` to see it resolved, rather than mirroring it here. Claude accepts the tier alias
+directly; the Codex and OpenCode ids are pinned against vendor documentation.
 
 ### Workspace-overridable tier table
 
