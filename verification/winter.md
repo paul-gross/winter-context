@@ -4,12 +4,12 @@ An inventory of the verification methods available for the winter ecosystem. Eac
 assert a winter change is correct.
 
 Method ids use the following scheme: commands and manual methods are `<scope>:<method>` (a manual method's method name
-is `manual`); `cli-probe:*` and `markdown:*` are category scopes — the workspace-level `winter` CLI probes and the
-mechanical markdown gates that every adopting repo runs identically; tools are unscoped under a flat `tool:`. The
-`winter:*` Python-QA rows run from `tools/winter-cli/` inside the `winter` repo worktree; each sibling project's rows
-run from that project's own worktree; `cli-probe:*` run from a configured workspace root. Choosing a scope for a new
-winter method: Python QA of winter's own source is `winter:*`; a behavioral probe of the installed CLI against a
-workspace is `cli-probe:*`.
+is `manual`, optionally suffixed with a subject, as in `winter-context:manual-shared-core` and `winter:manual-tracing`);
+`cli-probe:*` and `markdown:*` are category scopes — the workspace-level `winter` CLI probes and the mechanical markdown
+gates that every adopting repo runs identically; tools are unscoped under a flat `tool:`. The `winter:*` Python-QA rows
+run from `tools/winter-cli/` inside the `winter` repo worktree; each sibling project's rows run from that project's own
+worktree; `cli-probe:*` run from a configured workspace root. Choosing a scope for a new winter method: Python QA of
+winter's own source is `winter:*`; a behavioral probe of the installed CLI against a workspace is `cli-probe:*`.
 
 ## Commands
 
@@ -330,6 +330,230 @@ action key can shell out, so don't press one. The first refresh and each screen'
 
 Always `kill-server` the private socket, even when a check fails. **Gap**: no CI job drives the real dashboard.
 
+### winter:manual-tracing — OpenTelemetry tracing end to end (shim, export, propagation)
+
+Surface: the opt-in tracing of `winter` commands (`workspace:/context/winter-cli/tracing.md`) through the real launcher
+shim, a real OTLP/HTTP receiver, and real child processes. The unit tests cover the adapter against an in-process
+receiver; this exercise covers what they cannot — the shim's `WINTER_LAUNCH_TIME`, a collector that the verifier can
+read the span back from, and the process-level exit cost. Run everything from the workspace root, in one shell session
+(bash 5 or newer, for `$EPOCHREALTIME`), by executing the alpha shim **file** directly, so the installed shim at
+`~/.local/bin/winter` is never replaced. Every command it runs is non-mutating: `winter provision alpha --dry-run`, and
+a scratch workspace for the provider probe.
+
+Setup:
+
+```bash
+SHIM=./alpha/winter/tools/winter-cli/bin/winter
+SCRATCH=$(mktemp -d)
+
+# A known caller context, and a fresh trace id for each run so one trace holds exactly one span.
+unset OTEL_SERVICE_NAME OTEL_RESOURCE_ATTRIBUTES
+fresh_parent() {
+  TRACE_ID=$(python3 -c 'import secrets; print(secrets.token_hex(16))')
+  CALLER_SPAN=00f067aa0ba902b7
+  export TRACEPARENT=00-$TRACE_ID-$CALLER_SPAN-01
+}
+
+# A local Jaeger: OTLP/HTTP on 4318, query API and UI on 16686.
+docker run --rm -d --name winter-jaeger -p 16686:16686 -p 4318:4318 jaegertracing/jaeger:latest
+until curl -sf http://localhost:16686/api/v3/services >/dev/null; do sleep 1; done
+export WINTER_OTEL_EXPORTER_OTLP_ENDPOINT=http://localhost:4318
+
+# A hanging endpoint: a localhost socket that accepts and never answers.
+python3 -c 'import socket
+s = socket.socket()
+s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+s.bind(("127.0.0.1", 4319))
+s.listen(64)
+held = []
+while True:
+    held.append(s.accept()[0])' &
+HANG_PID=$!
+
+# Read one span back from Jaeger: name, parent span id, service.name, start time in microseconds.
+cat > "$SCRATCH/span.py" <<'PY'
+import json, sys, time, urllib.request
+url = f"http://localhost:16686/api/traces/{sys.argv[1]}"
+for _ in range(40):
+    try:
+        trace = json.load(urllib.request.urlopen(url))["data"][0]
+        break
+    except Exception:
+        time.sleep(0.5)
+else:
+    sys.exit(f"no trace {sys.argv[1]} in Jaeger")
+(span,) = trace["spans"]
+print(json.dumps({
+    "name": span["operationName"],
+    "parent": [r["spanID"] for r in span["references"] if r["refType"] == "CHILD_OF"],
+    "service": trace["processes"][span["processID"]]["serviceName"],
+    "start_us": span["startTime"],
+}))
+PY
+```
+
+Teardown, always, even when a check fails:
+
+```bash
+kill "$HANG_PID"; docker rm -f winter-jaeger; rm -rf "$SCRATCH"
+unset WINTER_OTEL_EXPORTER_OTLP_ENDPOINT TRACEPARENT PROVIDER_LOG   # later commands in this shell run untraced
+```
+
+Checks:
+
+- **Span content.** Run the command, then read the span from the trace JSON Jaeger serves at `/api/traces/<trace_id>`
+  (the helper fetches it):
+
+  ```bash
+  fresh_parent
+  "$SHIM" --winter=./alpha/winter provision alpha --dry-run; echo "exit $?"
+  python3 "$SCRATCH/span.py" "$TRACE_ID"
+  ```
+
+  Pass: the command prints `exit 0`; `name` is `winter provision`, `parent` is `["00f067aa0ba902b7"]` (the caller's span
+  id), `service` is `winter`. The helper fails unless the trace holds exactly one span. Open `http://localhost:16686` to
+  see the same trace in the UI.
+
+- **Start time.** Run the shim under `bash -x`; the trace prints the exported value:
+
+  ```bash
+  fresh_parent
+  bash -x "$SHIM" --winter=./alpha/winter provision alpha --dry-run >/dev/null 2>"$SCRATCH/xtrace.txt"
+  launch=$(sed -n 's/^+ export WINTER_LAUNCH_TIME=//p' "$SCRATCH/xtrace.txt")
+  echo "launch=${launch/[.,]/}"
+  python3 "$SCRATCH/span.py" "$TRACE_ID"
+  ```
+
+  Pass: `start_us` equals `launch` with its decimal separator removed (both are microseconds since the epoch).
+
+- **Exit cost.** The same command against two endpoints — the responsive Jaeger receiver and the hanging socket — so the
+  import and setup path is identical and the difference is the export cost. The cap is 100 ms, and the pass threshold
+  adds 50 ms of measurement margin:
+
+  ```bash
+  timed_run() {   # prints wall ms; fails on a non-zero exit or any stderr output
+    local s e
+    s=$EPOCHREALTIME
+    WINTER_OTEL_EXPORTER_OTLP_ENDPOINT=$1 "$SHIM" --winter=./alpha/winter provision alpha --dry-run \
+      >/dev/null 2>"$SCRATCH/stderr.txt" || { echo "exit code $?" >&2; return 1; }
+    e=$EPOCHREALTIME
+    [[ ! -s "$SCRATCH/stderr.txt" ]] || { echo "stderr not empty" >&2; return 1; }
+    echo $(( (${e/[.,]/} - ${s/[.,]/}) / 1000 ))
+  }
+  samples() { for _ in $(seq 11); do timed_run "$1" || return 1; done; }
+
+  timed_run http://127.0.0.1:4318 >/dev/null     # warm-up: the first run may build the venv
+  samples http://127.0.0.1:4318 > "$SCRATCH/responsive.txt" && samples http://127.0.0.1:4319 > "$SCRATCH/hanging.txt" \
+    || echo "FAIL: a run exited non-zero or wrote to stderr"
+  responsive=$(sort -n "$SCRATCH/responsive.txt" | sed -n 6p)
+  hanging=$(sort -n "$SCRATCH/hanging.txt" | sed -n 6p)
+  echo "exit cost: $((hanging - responsive)) ms (pass threshold 150)"
+  ```
+
+  Pass: all 22 runs exit 0 with empty stderr, and the hanging median minus the responsive median is at most 150 ms (the
+  100 ms cap plus 50 ms).
+
+- **Shim without `EPOCHREALTIME`.** A stub `mise` first on `PATH` prints its environment and exits, so the shim runs to
+  its `exec` and nothing else. Run it under the host bash, then under bash 4.4, which has no `EPOCHREALTIME`:
+
+  ```bash
+  mkdir -p "$SCRATCH/nm/ws/.winter" "$SCRATCH/nm/ws/tools/winter-cli" "$SCRATCH/nm/stub"
+  touch "$SCRATCH/nm/ws/.winter/config.toml"
+  printf '#!/bin/sh\nenv\n' > "$SCRATCH/nm/stub/mise" && chmod +x "$SCRATCH/nm/stub/mise"
+  SHIM_ABS=$(realpath "$SHIM")
+
+  # host bash (5 or newer)
+  (cd "$SCRATCH/nm/ws" && env -u WINTER_LAUNCH_TIME PATH="$SCRATCH/nm/stub:$PATH" bash "$SHIM_ABS" ws status) \
+    >"$SCRATCH/host.out" 2>"$SCRATCH/host.err"; echo "host exit $?"
+  grep -E '^(WINTER_LAUNCH_TIME|WINTER_INVOCATION_CWD)=' "$SCRATCH/host.out"; cat "$SCRATCH/host.err"
+
+  # bash 4.4: mount the shim and the minimal workspace
+  docker run --rm bash:4.4 bash -c 'echo "EPOCHREALTIME=${EPOCHREALTIME:-unset}"'     # unset
+  docker run --rm -v "$SCRATCH/nm:/scr" -v "$SHIM_ABS:/scr/shim:ro" -w /scr/ws \
+    -e PATH=/scr/stub:/usr/local/bin:/usr/bin:/bin bash:4.4 bash /scr/shim ws status \
+    >"$SCRATCH/old.out" 2>"$SCRATCH/old.err"; echo "bash 4.4 exit $?"
+  grep -E '^(WINTER_LAUNCH_TIME|WINTER_INVOCATION_CWD)=' "$SCRATCH/old.out"; cat "$SCRATCH/old.err"
+  ```
+
+  Pass: `host.err` and `old.err` are both empty. The host run exits 0 and prints `WINTER_LAUNCH_TIME=<seconds>.<micros>`
+  (or with a `,`). The bash 4.4 run exits 0 and prints `WINTER_INVOCATION_CWD=` (the shim reached the stub) with no
+  `WINTER_LAUNCH_TIME=` line and no `unbound variable` message.
+
+- **Version-1 fallback.** Extract the version-1 shim from the base commit — the feature branch's merge base, or any
+  commit whose shim declares `WINTER_SHIM_VERSION=1` — and run it the same way as the version-2 shim. It exports no
+  launch time, so its span starts at command dispatch, after the launcher gap. Measure each span's start offset from the
+  instant recorded just before the shim is spawned:
+
+  ```bash
+  git -C alpha/winter show "$(git -C alpha/winter merge-base HEAD origin/master)":tools/winter-cli/bin/winter \
+    > "$SCRATCH/shim-v1" && chmod +x "$SCRATCH/shim-v1"
+  grep '^WINTER_SHIM_VERSION=' "$SCRATCH/shim-v1" "$SHIM"      # 1 and 2
+
+  start_offset_ms() {   # span start minus the instant before spawning, in ms
+    fresh_parent
+    local before=$EPOCHREALTIME start_us
+    "$1" --winter=./alpha/winter provision alpha --dry-run >/dev/null || return 1
+    start_us=$(python3 "$SCRATCH/span.py" "$TRACE_ID" | python3 -c 'import json, sys; print(json.load(sys.stdin)["start_us"])')
+    echo $(( (start_us - ${before/[.,]/}) / 1000 ))
+  }
+  : > "$SCRATCH/v1.txt"; : > "$SCRATCH/v2.txt"
+  for _ in 1 2 3 4 5; do
+    start_offset_ms "$SHIM" >> "$SCRATCH/v2.txt"
+    start_offset_ms "$SCRATCH/shim-v1" >> "$SCRATCH/v1.txt"
+  done
+  v2=$(sort -n "$SCRATCH/v2.txt" | sed -n 3p); v1=$(sort -n "$SCRATCH/v1.txt" | sed -n 3p)
+  echo "v1 offset $v1 ms, v2 offset $v2 ms, difference $((v1 - v2)) ms (need at least 100)"
+  ```
+
+  Pass: the version-1 median offset exceeds the version-2 median offset by at least 100 ms. The threshold sits
+  deliberately below the launcher gap `workspace:/context/winter-cli/tracing.md` documents (a few hundred milliseconds),
+  so a version-1 shim cannot pass by noise alone.
+
+- **Service launches carry no trace context.** A scratch workspace whose scratch provider records the `TRACEPARENT` it
+  was handed shows that `service up` and `service restart` pass none, whether tracing is on or off. The provider writes
+  to a log file, because its stdout is winter's wire format. The CLI runs through `uv run --project` from inside the
+  scratch workspace, not through the shim: the shim re-roots Python in the checkout's own `tools/winter-cli/`
+  (`mise -C`), so the CLI would resolve the live workspace and its registry instead of the scratch one. The scratch
+  `state.toml` registers env `alpha`; without it the registry is empty, no `alpha` cell matches, and the provider is
+  never called for `alpha`:
+
+  ```bash
+  W=$(realpath alpha/winter)
+  mkdir -p "$SCRATCH/ws/.winter" "$SCRATCH/ws/alpha" "$SCRATCH/prov"
+  touch "$SCRATCH/ws/.winter/config.toml"
+  printf '[env_index]\nalpha = 1\n' > "$SCRATCH/ws/.winter/state.toml"
+  printf 'name = "scratch-provider"\nprefix = "scr"\nprovides.service = "orchestrate"\n' > "$SCRATCH/prov/winter-ext.toml"
+  printf '#!/usr/bin/env bash\necho "$* TRACEPARENT=${TRACEPARENT-<unset>}" >> "${PROVIDER_LOG:?}"\n' > "$SCRATCH/prov/orchestrate"
+  chmod +x "$SCRATCH/prov/orchestrate"
+
+  export PROVIDER_LOG=$SCRATCH/provider.log; : > "$PROVIDER_LOG"
+  fresh_parent
+  for endpoint in "" http://localhost:4318; do          # tracing off, then on
+    echo "== tracing $([[ -n $endpoint ]] && echo on || echo off)" >> "$PROVIDER_LOG"
+    for action in up restart down; do
+      (cd "$SCRATCH/ws" && WINTER_OTEL_EXPORTER_OTLP_ENDPOINT=$endpoint uv run --project "$W/tools/winter-cli" winter \
+        --service-orchestrator="$SCRATCH/prov" service "$action" alpha) >/dev/null 2>&1
+    done
+  done
+  cat "$PROVIDER_LOG"
+  echo "caller: $TRACEPARENT"
+  ```
+
+  Pass: the log holds, in order, these lines per mode (`<caller>` is the printed `caller:` value):
+
+  | Mode        | `up workspace`            | `up alpha`                | `restart alpha`           | `down alpha`                                                      |
+  | ----------- | ------------------------- | ------------------------- | ------------------------- | ----------------------------------------------------------------- |
+  | tracing off | `... TRACEPARENT=<unset>` | `... TRACEPARENT=<unset>` | `... TRACEPARENT=<unset>` | `... TRACEPARENT=<caller>`, unchanged                             |
+  | tracing on  | `... TRACEPARENT=<unset>` | `... TRACEPARENT=<unset>` | `... TRACEPARENT=<unset>` | `... TRACEPARENT=` the caller's trace id with a different span id |
+
+  The `up` and `restart` lines must read `<unset>` in both modes. The `down` line is the control, since `down` follows
+  winter's own environment: a `down` line equal to the caller's value with tracing on, or missing, fails the check. An
+  empty log, a log without the `up alpha`, `restart alpha`, and `down alpha` lines for a mode, or a mode marker with no
+  lines under it is a setup failure (the scratch registry or provider did not take effect), not a pass.
+
+**Gap**: no CI job runs the shim, a live collector, or a hanging endpoint — the unit tests drive the adapter against an
+in-process receiver, and this method covers the rest by hand.
+
 ### winter-test-service:manual — full-stack app exercise
 
 Stand up `winter-test-service` (web + api + worker + Postgres + RabbitMQ) under a feature env to exercise orchestration,
@@ -366,3 +590,5 @@ Setup an agent uses to stand up the scenario a verification needs — not assert
   setup.
 - `workspace:/context/winter-cli/usage/clean.md` — the full `winter clean` surface, owner of the clean-verb command
   reference.
+- `workspace:/context/winter-cli/tracing.md` — the opt-in tracing behavior `winter:manual-tracing` verifies: the span,
+  propagation, the launcher gap, and the exit cap.
