@@ -337,8 +337,9 @@ shim, a real OTLP/HTTP receiver, and real child processes. The unit tests cover 
 receiver; this exercise covers what they cannot — the shim's `WINTER_LAUNCH_TIME`, a collector that the verifier can
 read the span back from, and the process-level exit cost. Run everything from the workspace root, in one shell session
 (bash 5 or newer, for `$EPOCHREALTIME`), by executing the alpha shim **file** directly, so the installed shim at
-`~/.local/bin/winter` is never replaced. Every command it runs is non-mutating: `winter provision alpha --dry-run`, and
-a scratch workspace for the provider probe.
+`~/.local/bin/winter` is never replaced. Every command it runs is non-mutating: `winter provision alpha --dry-run` and
+the read-only `winter ws status alpha` through the shim, the dashboard on a private tmux socket with `q` as the only key
+pressed, and every provision and service step inside a scratch workspace.
 
 Setup:
 
@@ -354,26 +355,38 @@ fresh_parent() {
   export TRACEPARENT=00-$TRACE_ID-$CALLER_SPAN-01
 }
 
-# A local Jaeger: OTLP/HTTP on 4318, query API and UI on 16686.
-docker run --rm -d --name winter-jaeger -p 16686:16686 -p 4318:4318 jaegertracing/jaeger:latest
-until curl -sf http://localhost:16686/api/v3/services >/dev/null; do sleep 1; done
-export WINTER_OTEL_EXPORTER_OTLP_ENDPOINT=http://localhost:4318
+# Host ports: Jaeger's OTLP/HTTP receiver, its query API and UI, and the hanging endpoint. A local collector often
+# already holds 4318; when the check below names a port in use, set a free one here and rerun the setup from this line.
+OTLP_PORT=4318 QUERY_PORT=16686 HANG_PORT=4319
+RESPONSIVE=http://127.0.0.1:$OTLP_PORT HANGING=http://127.0.0.1:$HANG_PORT
+export JAEGER=http://127.0.0.1:$QUERY_PORT   # the read-back helpers below query Jaeger here
+port_free() { python3 -c 'import socket, sys; sys.exit(socket.socket().connect_ex(("127.0.0.1", int(sys.argv[1]))) == 0)' "$1" \
+  || { echo "SETUP FAILED: port $1 is in use" >&2; return 1; }; }
+
+# A local Jaeger. Tracing is switched on only once this Jaeger answers, so no span reaches any other collector.
+if port_free "$OTLP_PORT" && port_free "$QUERY_PORT" && port_free "$HANG_PORT" \
+  && docker run --rm -d --name winter-jaeger -p "127.0.0.1:$QUERY_PORT:16686" -p "127.0.0.1:$OTLP_PORT:4318" \
+    jaegertracing/jaeger:latest; then
+  for _ in $(seq 60); do curl -sf "$JAEGER/api/v3/services" >/dev/null && break; sleep 1; done
+  curl -sf "$JAEGER/api/v3/services" >/dev/null && export WINTER_OTEL_EXPORTER_OTLP_ENDPOINT=$RESPONSIVE \
+    || echo "SETUP FAILED: Jaeger is not answering on $JAEGER" >&2
+fi
 
 # A hanging endpoint: a localhost socket that accepts and never answers.
-python3 -c 'import socket
+python3 -c 'import socket, sys
 s = socket.socket()
 s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-s.bind(("127.0.0.1", 4319))
+s.bind(("127.0.0.1", int(sys.argv[1])))
 s.listen(64)
 held = []
 while True:
-    held.append(s.accept()[0])' &
+    held.append(s.accept()[0])' "$HANG_PORT" &
 HANG_PID=$!
 
 # Read one span back from Jaeger: name, parent span id, service.name, start time in microseconds.
 cat > "$SCRATCH/span.py" <<'PY'
-import json, sys, time, urllib.request
-url = f"http://localhost:16686/api/traces/{sys.argv[1]}"
+import json, os, sys, time, urllib.request
+url = f"{os.environ['JAEGER']}/api/traces/{sys.argv[1]}"
 for _ in range(40):
     try:
         trace = json.load(urllib.request.urlopen(url))["data"][0]
@@ -390,13 +403,176 @@ print(json.dumps({
     "start_us": span["startTime"],
 }))
 PY
+
+# Read a whole trace back: one entry per span, with its parent span id and its tags as a dict.
+cat > "$SCRATCH/spans.py" <<'PY'
+import json, os, sys, time, urllib.request
+url = f"{os.environ['JAEGER']}/api/traces/{sys.argv[1]}"
+spans, stable = [], 0
+for _ in range(40):                      # the trace is whole once its span count stops growing
+    try:
+        trace = json.load(urllib.request.urlopen(url))["data"][0]
+    except Exception:
+        time.sleep(0.5)
+        continue
+    stable = stable + 1 if len(trace["spans"]) == len(spans) else 0
+    spans = trace["spans"]
+    if stable == 2:
+        break
+    time.sleep(0.5)
+else:
+    sys.exit(f"no stable trace {sys.argv[1]} in Jaeger")
+print(json.dumps([{
+    "id": s["spanID"],
+    "name": s["operationName"],
+    "parent": next((r["spanID"] for r in s["references"] if r["refType"] == "CHILD_OF"), None),
+    "service": trace["processes"][s["processID"]]["serviceName"],
+    "start_us": s["startTime"],
+    "tags": {t["key"]: t["value"] for t in s["tags"]},
+} for s in spans]))
+PY
+
+# Read a dashboard session back by its unique service name: the `dashboard <purpose>` roots, each with its
+# trace id, parent, span links and the number of `git status` spans in its trace, and the session span.
+# Argument 2 is "roots" (poll up to 12 s for a root holding git status spans) or "session" (poll up to 20 s
+# for the session span).
+cat > "$SCRATCH/dash.py" <<'PY'
+import datetime, json, os, sys, time, urllib.parse, urllib.request
+service, want = sys.argv[1], sys.argv[2]
+
+def read():
+    now = datetime.datetime.now(datetime.timezone.utc)
+    query = urllib.parse.urlencode({
+        "query.service_name": service,
+        "query.start_time_min": (now - datetime.timedelta(hours=1)).strftime("%Y-%m-%dT%H:%M:%SZ"),
+        "query.start_time_max": (now + datetime.timedelta(hours=1)).strftime("%Y-%m-%dT%H:%M:%SZ"),
+    })
+    spans = []
+    for line in urllib.request.urlopen(f"{os.environ['JAEGER']}/api/v3/traces?{query}").read().splitlines():
+        for rs in json.loads(line)["result"]["resourceSpans"]:
+            for ss in rs["scopeSpans"]:
+                spans += ss["spans"]
+    return spans
+
+def summarize(spans):
+    return {
+        "roots": [{
+            "name": r["name"],
+            "trace": r["traceId"],
+            "parent": r.get("parentSpanId") or None,
+            "link": [(l["traceId"], l["spanId"]) for l in r.get("links", [])],
+            "git_status": sum(1 for s in spans if s["name"] == "git status" and s["traceId"] == r["traceId"]),
+        } for r in spans if r["name"].startswith("dashboard ")],
+        "session": [{
+            "trace": s["traceId"],
+            "id": s["spanId"],
+            "parent": s.get("parentSpanId") or None,
+        } for s in spans if s["name"] == "winter dashboard"],
+    }
+
+for _ in range(24 if want == "roots" else 40):
+    try:
+        out = summarize(read())
+    except Exception:
+        out = {"roots": [], "session": []}
+    if any(r["git_status"] for r in out["roots"]) if want == "roots" else out["session"]:
+        break
+    time.sleep(0.5)
+print(json.dumps(out))
+PY
+
+# The assertions of the inner-span and dashboard checks; each prints `ok: ...` or fails with the broken expectation.
+cat > "$SCRATCH/check.py" <<'PY'
+import json, pathlib, sys, tomllib
+CALLER = "00f067aa0ba902b7"
+
+def one(spans, name):
+    (span,) = [s for s in spans if s["name"] == name]
+    return span
+
+def logged_span_id(lines, prefix):       # the span id in the TRACEPARENT of the one log line that starts with prefix
+    (line,) = [l for l in lines if l.startswith(prefix)]
+    return line.split("TRACEPARENT=")[1].split("-")[2]
+
+def status(trace, output, env="alpha"):
+    spans, lines = json.load(open(trace)), open(output).read().splitlines()
+    shown, in_table = set(), False       # the repos the env table lists: first column, up to the first blank line
+    for line in lines:
+        if not in_table:
+            in_table = line.startswith("REPO")
+        elif not line.strip():
+            break
+        else:
+            shown.add(line.split()[0])
+    on_disk = {p.name for p in pathlib.Path(env).iterdir() if (p / ".git").exists()}
+    assert shown == on_disk, f"output lists {sorted(shown)}, worktrees on disk {sorted(on_disk)}"
+    root = one(spans, "winter ws status")
+    assert root["parent"] == CALLER, root["parent"]
+    git = {s["id"]: s for s in spans if s["name"].startswith("git ")}
+    assert git, "no git spans"
+    for s in git.values():
+        assert s["parent"] == root["id"] or s["parent"] in git, f"{s['name']} is parented on {s['parent']}"
+        assert "winter.repo" in s["tags"], f"{s['name']} has no winter.repo"
+    reads = [s for s in git.values() if s["name"] == "git status"]
+    have = {s["tags"]["winter.repo"] for s in reads if s["tags"].get("winter.env") == env}
+    assert have == on_disk, f"no git status span with winter.env={env} for {sorted(on_disk - have)}"
+    assert any("winter.env" not in s["tags"] for s in reads), "no git status span without an env (checkouts, standalones)"
+    others = set(tomllib.load(open(".winter/state.toml", "rb"))["env_index"]) - {env}
+    seen = {s["tags"]["winter.env"] for s in git.values() if "winter.env" in s["tags"]} - {env}
+    assert not others or seen, f"no git span for the other envs {sorted(others)}"
+    print(f"ok: {len(git)} git spans; {len(have)} repos read in {env}; other envs seen {sorted(seen)}")
+
+def service(trace, provider_log):
+    spans, lines = json.load(open(trace)), open(provider_log).read().splitlines()
+    up, down = one(spans, "winter service up"), one(spans, "winter service down")
+    assert up["parent"] == down["parent"] == CALLER
+    cells = [s for s in spans if s["name"] == "service provider up"]
+    assert {s["tags"]["winter.scope"] for s in cells} == {"workspace", "alpha"}
+    assert all(s["parent"] == up["id"] for s in cells)
+    wait = one(spans, "service readiness wait")
+    assert wait["parent"] == up["id"]
+    assert wait["tags"]["winter.service.patterns"] == 1 and wait["tags"]["winter.ready"] is True
+    cell_down = one(spans, "service provider down")
+    assert cell_down["parent"] == down["id"] and cell_down["tags"]["winter.scope"] == "alpha"
+    providers = {s["tags"].get("winter.provider") for s in cells + [cell_down]}
+    assert len(providers) == 1 and not providers & {None, ""}, providers
+    assert logged_span_id(lines, "down alpha") == cell_down["id"], "down's TRACEPARENT is not the provider down span"
+    assert logged_span_id(lines, "status") == wait["id"], "the readiness poll's TRACEPARENT is not the wait span"
+    assert all("TRACEPARENT=<unset>" in l for l in lines if l.startswith("up "))
+    print(f"ok: provider {providers.pop()}")
+
+def provision(trace, output, handler_log, trace_id):
+    spans, text, logged = json.load(open(trace)), open(output).read(), open(handler_log).read().split()
+    root, handler = one(spans, "winter provision"), one(spans, "provision handler apply")
+    assert handler["parent"] == root["id"]
+    tags = handler["tags"]
+    assert tags["winter.env"] == "alpha" and tags["winter.exit_code"] == 0 and "winter.repo" not in tags
+    assert tags["winter.handler"] and tags["winter.handler"] in text, "winter.handler is not the label the output shows"
+    assert [l.split("-")[1:3] for l in logged] == [[trace_id, handler["id"]]], logged
+    print(f"ok: {tags['winter.handler']}")
+
+def dashboard(live, end, trace_id):
+    live, end = json.load(open(live)), json.load(open(end))
+    assert any(r["git_status"] for r in live["roots"]), "no root holding git status spans before quitting"
+    assert not live["session"], "the session span was exported before quitting"
+    (session,) = end["session"]
+    assert session["trace"] == trace_id and session["parent"] == CALLER, session
+    assert "dashboard refresh workspace" in {r["name"] for r in end["roots"]}
+    for r in end["roots"]:
+        assert r["parent"] is None and r["trace"] != trace_id, r
+        assert r["link"] == [[trace_id, session["id"]]], r
+    print(f"ok: {len(end['roots'])} roots, all linked to the session span")
+
+{"status": status, "service": service, "provision": provision, "dashboard": dashboard}[sys.argv[1]](*sys.argv[2:])
+PY
 ```
 
 Teardown, always, even when a check fails:
 
 ```bash
+tmux -L winter-trace kill-server 2>/dev/null
 kill "$HANG_PID"; docker rm -f winter-jaeger; rm -rf "$SCRATCH"
-unset WINTER_OTEL_EXPORTER_OTLP_ENDPOINT TRACEPARENT PROVIDER_LOG   # later commands in this shell run untraced
+unset WINTER_OTEL_EXPORTER_OTLP_ENDPOINT TRACEPARENT PROVIDER_LOG HANDLER_LOG JAEGER   # later commands run untraced
 ```
 
 Checks:
@@ -411,8 +587,8 @@ Checks:
   ```
 
   Pass: the command prints `exit 0`; `name` is `winter provision`, `parent` is `["00f067aa0ba902b7"]` (the caller's span
-  id), `service` is `winter`. The helper fails unless the trace holds exactly one span. Open `http://localhost:16686` to
-  see the same trace in the UI.
+  id), `service` is `winter`. The helper fails unless the trace holds exactly one span. Open the `$JAEGER` URL to see
+  the same trace in the UI.
 
 - **Start time.** Run the shim under `bash -x`; the trace prints the exported value:
 
@@ -442,8 +618,8 @@ Checks:
   }
   samples() { for _ in $(seq 11); do timed_run "$1" || return 1; done; }
 
-  timed_run http://127.0.0.1:4318 >/dev/null     # warm-up: the first run may build the venv
-  samples http://127.0.0.1:4318 > "$SCRATCH/responsive.txt" && samples http://127.0.0.1:4319 > "$SCRATCH/hanging.txt" \
+  timed_run "$RESPONSIVE" >/dev/null     # warm-up: the first run may build the venv
+  samples "$RESPONSIVE" > "$SCRATCH/responsive.txt" && samples "$HANGING" > "$SCRATCH/hanging.txt" \
     || echo "FAIL: a run exited non-zero or wrote to stderr"
   responsive=$(sort -n "$SCRATCH/responsive.txt" | sed -n 6p)
   hanging=$(sort -n "$SCRATCH/hanging.txt" | sed -n 6p)
@@ -479,14 +655,13 @@ Checks:
   (or with a `,`). The bash 4.4 run exits 0 and prints `WINTER_INVOCATION_CWD=` (the shim reached the stub) with no
   `WINTER_LAUNCH_TIME=` line and no `unbound variable` message.
 
-- **Version-1 fallback.** Extract the version-1 shim from the base commit — the feature branch's merge base, or any
-  commit whose shim declares `WINTER_SHIM_VERSION=1` — and run it the same way as the version-2 shim. It exports no
-  launch time, so its span starts at command dispatch, after the launcher gap. Measure each span's start offset from the
-  instant recorded just before the shim is spawned:
+- **Version-1 fallback.** Extract the version-1 shim from the parent of the commit that introduced version 2, and run it
+  the same way as the version-2 shim. It exports no launch time, so its span starts at command dispatch, after the
+  launcher gap. Measure each span's start offset from the instant recorded just before the shim is spawned:
 
   ```bash
-  git -C alpha/winter show "$(git -C alpha/winter merge-base HEAD origin/master)":tools/winter-cli/bin/winter \
-    > "$SCRATCH/shim-v1" && chmod +x "$SCRATCH/shim-v1"
+  V2=$(git -C alpha/winter log --format=%H -S'WINTER_SHIM_VERSION=2' -- tools/winter-cli/bin/winter | tail -1)
+  git -C alpha/winter show "$V2^:tools/winter-cli/bin/winter" > "$SCRATCH/shim-v1" && chmod +x "$SCRATCH/shim-v1"
   grep '^WINTER_SHIM_VERSION=' "$SCRATCH/shim-v1" "$SHIM"      # 1 and 2
 
   start_offset_ms() {   # span start minus the instant before spawning, in ms
@@ -511,7 +686,8 @@ Checks:
 
 - **Service launches carry no trace context.** A scratch workspace whose scratch provider records the `TRACEPARENT` it
   was handed shows that `service up` and `service restart` pass none, whether tracing is on or off. The provider writes
-  to a log file, because its stdout is winter's wire format. The CLI runs through `uv run --project` from inside the
+  to a log file, because its stdout is winter's wire format, and answers `status` with a one-service healthy document
+  for the readiness wait in the service-span check below. The CLI runs through `uv run --project` from inside the
   scratch workspace, not through the shim: the shim re-roots Python in the checkout's own `tools/winter-cli/`
   (`mise -C`), so the CLI would resolve the live workspace and its registry instead of the scratch one. The scratch
   `state.toml` registers env `alpha`; without it the registry is empty, no `alpha` cell matches, and the provider is
@@ -523,12 +699,13 @@ Checks:
   touch "$SCRATCH/ws/.winter/config.toml"
   printf '[env_index]\nalpha = 1\n' > "$SCRATCH/ws/.winter/state.toml"
   printf 'name = "scratch-provider"\nprefix = "scr"\nprovides.service = "orchestrate"\n' > "$SCRATCH/prov/winter-ext.toml"
-  printf '#!/usr/bin/env bash\necho "$* TRACEPARENT=${TRACEPARENT-<unset>}" >> "${PROVIDER_LOG:?}"\n' > "$SCRATCH/prov/orchestrate"
+  printf '{"envs": [{"env": "alpha", "session": null, "port_base": null, "services": [{"name": "api", "state": "running", "health": "healthy", "ports": [], "handle": null, "log_path": null, "since": null}]}]}\n' > "$SCRATCH/prov/status.json"
+  printf '#!/usr/bin/env bash\necho "$* TRACEPARENT=${TRACEPARENT-<unset>}" >> "${PROVIDER_LOG:?}"\n[[ $1 == status ]] && cat "$(dirname "$0")/status.json"\nexit 0\n' > "$SCRATCH/prov/orchestrate"
   chmod +x "$SCRATCH/prov/orchestrate"
 
   export PROVIDER_LOG=$SCRATCH/provider.log; : > "$PROVIDER_LOG"
   fresh_parent
-  for endpoint in "" http://localhost:4318; do          # tracing off, then on
+  for endpoint in "" "$RESPONSIVE"; do          # tracing off, then on
     echo "== tracing $([[ -n $endpoint ]] && echo on || echo off)" >> "$PROVIDER_LOG"
     for action in up restart down; do
       (cd "$SCRATCH/ws" && WINTER_OTEL_EXPORTER_OTLP_ENDPOINT=$endpoint uv run --project "$W/tools/winter-cli" winter \
@@ -551,8 +728,173 @@ Checks:
   empty log, a log without the `up alpha`, `restart alpha`, and `down alpha` lines for a mode, or a mode marker with no
   lines under it is a setup failure (the scratch registry or provider did not take effect), not a pass.
 
-**Gap**: no CI job runs the shim, a live collector, or a hanging endpoint — the unit tests drive the adapter against an
-in-process receiver, and this method covers the rest by hand.
+- **Inner spans: `ws status`.** The one command here that runs through the alpha shim against the live workspace,
+  because `ws status` only reads. It exits 0 or 1 (1 reports a dirty worktree), so only a code above 1 is a failure:
+
+  ```bash
+  fresh_parent
+  "$SHIM" --winter=./alpha/winter ws status alpha > "$SCRATCH/status.out" 2>/dev/null; echo "exit $?"
+  python3 "$SCRATCH/spans.py" "$TRACE_ID" > "$SCRATCH/trace.json"
+  python3 "$SCRATCH/check.py" status "$SCRATCH/trace.json" "$SCRATCH/status.out"
+  ```
+
+  Pass: the exit code is 0 or 1 and `check.py` prints `ok`, which means all of the following:
+  - The trace holds one `winter ws status` root, parented on the caller's span.
+  - Every `git` span carries `winter.repo` and is parented on the root or on another `git` span, so the thread pools
+    keep the context.
+  - Every worktree on disk under `alpha/` has a row in the env table of the command's output, and a `git status` span
+    with that `winter.repo` and `winter.env` equal to `alpha`. The output check matters because a git span opens even
+    when the worktree path is missing, so the span alone does not prove git ran.
+  - `git status` spans without a `winter.env` appear (the main-branch checkouts and standalones), and so do spans
+    carrying each other env that `.winter/state.toml` registers, because status reads them before filtering.
+
+- **Service spans.** Reuses the scratch workspace and scratch provider of the previous check, from inside the scratch
+  workspace with `uv run --project`, never through the shim. One trace holds both commands:
+
+  ```bash
+  scratch_winter() { (cd "$SCRATCH/ws" && uv run --project "$W/tools/winter-cli" winter --service-orchestrator="$SCRATCH/prov" "$@"); }
+  export PROVIDER_LOG=$SCRATCH/provider.log; : > "$PROVIDER_LOG"
+  fresh_parent
+  scratch_winter service up alpha --wait >/dev/null 2>&1; echo "up exit $?"
+  scratch_winter service down alpha >/dev/null 2>&1; echo "down exit $?"
+  python3 "$SCRATCH/spans.py" "$TRACE_ID" > "$SCRATCH/trace.json"
+  python3 "$SCRATCH/check.py" service "$SCRATCH/trace.json" "$PROVIDER_LOG"
+  ```
+
+  Pass: both commands exit 0 and `check.py` prints `ok`, which means all of the following:
+  - Under the `winter service up` root: two `service provider up` spans, one for the `workspace` scope (the implicit
+    cell `up` dispatches first) and one for `alpha`, and a `service readiness wait` span with `winter.service.patterns`
+    1 and `winter.ready` true.
+  - Under the `winter service down` root: a `service provider down` span for `alpha`.
+  - Every provider span carries the same non-empty `winter.provider`.
+  - The span id in the `TRACEPARENT` that the provider logged for `down` equals the `service provider down` span's id,
+    and the one the `status` poll logged equals the `service readiness wait` span's id. The `up` lines still read
+    `<unset>`.
+
+- **Provision spans.** Give the scratch workspace's own config a handler whose `apply` logs the `TRACEPARENT` it
+  receives, then run `provision alpha` from inside the scratch workspace with `uv run --project`, never through the
+  shim. The handler is `feature-environment` scoped, so it runs in `$SCRATCH/ws/alpha` and nothing outside the scratch
+  workspace is touched:
+
+  ```bash
+  printf 'echo "$TRACEPARENT" >> "$HANDLER_LOG"\n' > "$SCRATCH/handler.sh"
+  printf '[[provision.dependency]]\nscope = "feature-environment"\napply = "sh %s/handler.sh"\n' "$SCRATCH" > "$SCRATCH/ws/.winter/config.toml"
+  export HANDLER_LOG=$SCRATCH/handler.log; : > "$HANDLER_LOG"
+  fresh_parent
+  (cd "$SCRATCH/ws" && uv run --project "$W/tools/winter-cli" winter provision alpha) > "$SCRATCH/provision.out" 2>&1; echo "exit $?"
+  python3 "$SCRATCH/spans.py" "$TRACE_ID" > "$SCRATCH/trace.json"
+  python3 "$SCRATCH/check.py" provision "$SCRATCH/trace.json" "$SCRATCH/provision.out" "$HANDLER_LOG" "$TRACE_ID"
+  ```
+
+  Pass: the command exits 0 and `check.py` prints `ok`, which means: a `provision handler apply` span under the
+  `winter provision` root, carrying `winter.env` `alpha`, `winter.exit_code` 0 and a `winter.handler` equal to the label
+  the provision output shows, and no `winter.repo` (the handler's directory is the env root, not a project worktree).
+  The span id in the `TRACEPARENT` that the handler logged equals the span's id.
+
+- **Exit cost with inner spans.** The hanging endpoint against a baseline of the same `ws status alpha` run in an
+  unsampled caller context (sampled flag `00`). The baseline does the same git work and loads the same tracing setup but
+  records no span and sends no request, so the hanging run's extra cost is recording and encoding every span plus the
+  exporter cap. Do not take the baseline from the same command run against the responsive receiver: both runs encode the
+  spans, so the encoding cost cancels out of the difference and the check cannot see it. Do not take it from a command
+  that emits only the root span either, such as `provision alpha --dry-run`: its own work is a fraction of
+  `ws status`'s, so the difference measures the commands, not the export. The cap is 100 ms, and the pass threshold adds
+  50 ms of measurement margin:
+
+  ```bash
+  timed_status() {   # $1 endpoint, $2 sampled flag; prints wall ms; fails on an exit code above 1 or any stderr output
+    local s e rc
+    s=$EPOCHREALTIME
+    TRACEPARENT=00-$TRACE_ID-$CALLER_SPAN-$2 WINTER_OTEL_EXPORTER_OTLP_ENDPOINT=$1 \
+      "$SHIM" --winter=./alpha/winter ws status alpha >/dev/null 2>"$SCRATCH/stderr.txt"; rc=$?
+    e=$EPOCHREALTIME
+    (( rc <= 1 )) || { echo "exit code $rc" >&2; return 1; }
+    [[ ! -s "$SCRATCH/stderr.txt" ]] || { echo "stderr not empty" >&2; return 1; }
+    echo $(( (${e/[.,]/} - ${s/[.,]/}) / 1000 ))
+  }
+
+  fresh_parent
+  timed_status "$RESPONSIVE" 01 >/dev/null 2>&1     # warm-up: the first run may rebuild the venv
+  : > "$SCRATCH/baseline.txt"; : > "$SCRATCH/hanging-inner.txt"
+  for _ in $(seq 11); do
+    timed_status "$RESPONSIVE" 00 >> "$SCRATCH/baseline.txt" && timed_status "$HANGING" 01 >> "$SCRATCH/hanging-inner.txt" \
+      || { echo "FAIL: a run exited above 1 or wrote to stderr"; break; }
+  done
+  baseline=$(sort -n "$SCRATCH/baseline.txt" | sed -n 6p)
+  hanging=$(sort -n "$SCRATCH/hanging-inner.txt" | sed -n 6p)
+  echo "exit cost with inner spans: $((hanging - baseline)) ms (pass threshold 150)"
+  ```
+
+  Pass: all 22 runs exit 0 or 1 with empty stderr, and the hanging median minus the baseline median is at most 150 ms
+  (the 100 ms cap plus 50 ms). The ordinary-size claim in `workspace:/context/winter-cli/tracing.md` covers this
+  command's roughly 100 spans.
+
+- **Dashboard.** Start `winter dashboard` headless on a private tmux socket, as in
+  `winter:manual — dashboard screens (headless tmux)`, with tracing on, and press `q` and no other key, so the live
+  workspace is only read. Each run gets its own `service.name`, so the reader finds that run's traces without knowing
+  their ids (the session roots are traces of their own), and a fresh caller context, so the session span lands in a
+  trace whose id is known. A run is `dash_start` (the dashboard is up and has drawn its first screen), then reads, then
+  `quit_ms`:
+
+  ```bash
+  dash_start() {   # $1 endpoint; sets DASH_SVC and a fresh TRACE_ID, and starts the dashboard
+    DASH_SVC=winter-dash-$RANDOM$RANDOM
+    fresh_parent
+    tmux -L winter-trace new-session -d -s dash -x 260 -y 90 \
+      "env OTEL_SERVICE_NAME=$DASH_SVC WINTER_OTEL_EXPORTER_OTLP_ENDPOINT=$1 $SHIM --winter=./alpha/winter dashboard"
+    for _ in $(seq 60); do
+      tmux -L winter-trace capture-pane -p -t dash 2>/dev/null | grep -q 'Winter Dashboard' && return 0
+      sleep 0.5
+    done
+    echo "dashboard did not draw" >&2; return 1
+  }
+  quit_ms() {   # presses q; prints ms until the dashboard process has exited and the tmux session with it
+    local s
+    s=${EPOCHREALTIME/[.,]/}
+    tmux -L winter-trace send-keys -t dash q
+    while tmux -L winter-trace has-session -t dash 2>/dev/null; do
+      (( ${EPOCHREALTIME/[.,]/} - s < 10000000 )) || { echo "dashboard did not exit" >&2; return 1; }
+    done
+    echo $(( (${EPOCHREALTIME/[.,]/} - s) / 1000 ))
+  }
+
+  dash_start "$WINTER_OTEL_EXPORTER_OTLP_ENDPOINT"
+  python3 "$SCRATCH/dash.py" "$DASH_SVC" roots > "$SCRATCH/dash-live.json"     # before quitting
+  quit_ms
+  python3 "$SCRATCH/dash.py" "$DASH_SVC" session > "$SCRATCH/dash-end.json"     # after quitting
+  tmux -L winter-trace kill-server 2>/dev/null
+  python3 "$SCRATCH/check.py" dashboard "$SCRATCH/dash-live.json" "$SCRATCH/dash-end.json" "$TRACE_ID"
+  ```
+
+  Pass: `check.py` prints `ok`, which means all of the following:
+  - Within about 12 s of starting, and before quitting, the receiver holds a `dashboard <purpose>` trace that contains
+    `git status` spans. The session span is not there yet: it is sent only at exit.
+  - After `q`, the `winter dashboard` session span appears in the run's own trace, parented on the caller's span.
+  - Every `dashboard <purpose>` root, `dashboard refresh workspace` among them, has no parent, lives in a trace of its
+    own, and carries exactly one span link, to the session span.
+
+  Quit cost: the time from `send-keys q` until the dashboard's process has exited. Take 5 runs each against the
+  responsive receiver and the hanging endpoint, after the dashboard has run past one 5 s flush interval, so a flush has
+  happened before the quit:
+
+  ```bash
+  : > "$SCRATCH/quit-responsive.txt"; : > "$SCRATCH/quit-hanging.txt"
+  for _ in 1 2 3 4 5; do
+    dash_start "$RESPONSIVE" && sleep 6 && quit_ms >> "$SCRATCH/quit-responsive.txt"
+    tmux -L winter-trace kill-server 2>/dev/null
+    dash_start "$HANGING" && sleep 6 && quit_ms >> "$SCRATCH/quit-hanging.txt"
+    tmux -L winter-trace kill-server 2>/dev/null
+  done
+  wc -l "$SCRATCH"/quit-*.txt                                                 # 5 lines each, or a run failed
+  responsive=$(sort -n "$SCRATCH/quit-responsive.txt" | sed -n 3p)
+  hanging=$(sort -n "$SCRATCH/quit-hanging.txt" | sed -n 3p)
+  echo "quit cost: $((hanging - responsive)) ms (pass threshold 150)"
+  ```
+
+  Pass: five lines in each file, and the hanging median exceeds the responsive median by at most 150 ms (the 100 ms cap
+  plus 50 ms). Always `kill-server` the private socket, even when a check fails.
+
+**Gap**: no CI job runs the shim, a live collector, a hanging endpoint, or the dashboard under tracing — the unit tests
+drive the adapter against an in-process receiver, and this method covers the rest by hand.
 
 ### winter-test-service:manual — full-stack app exercise
 

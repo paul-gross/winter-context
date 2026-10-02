@@ -19,8 +19,10 @@ tools/winter-cli/src/winter_cli/
 │   ├── cli_output_service.py            # ICliOutputService — TUI/CLI output abstraction
 │   ├── cli_input_validation_service.py  # ICliInputValidationService — click-bound validators
 │   ├── config_file.py                   # IConfigFileReader — TOML loader seam
+│   ├── context_thread_pool.py           # ContextThreadPoolExecutor — thread pool that carries the submitter's context
 │   ├── filesystem.py                    # IFilesystem — file/dir read/write seam
 │   ├── subprocess_runner.py             # ISubprocessRunner — process execution seam
+│   ├── tracing.py                       # ICommandTracer / IOperationTracer — span seams for tracing
 │   └── internal/                        # adapters for the core Protocols
 ├── modules/               # feature packages
 │   ├── workspace/         # everything reachable from `winter ws *` and `winter repo *`
@@ -45,7 +47,7 @@ tools/winter-cli/src/winter_cli/
 │   │   ├── models/                # domain + service models (enums, dataclasses)
 │   │   ├── repo_repository.py     # IReadRepoRepository / IWriteRepoRepository (Protocols)
 │   │   ├── workspace_repository.py # IReadWorkspaceRepository (Protocol)
-│   │   └── internal/              # concrete adapters: git_ops_service, gitpython_repository, repo_error_factory, …
+│   │   └── internal/              # concrete adapters: git_ops_service, gitpython_repository, git_operation, repo_error_factory, …
 │   └── tui/               # textual-based dashboard (`winter dashboard`)
 ├── plugins/               # plugin loader — discovers extension click commands + TUI plugins
 └── util.py
@@ -184,6 +186,111 @@ Full testing conventions — directory layout, conftest scoping, fake-vs-mock gu
 live in `../standards/testing.md`. The winter-cli tree under `tests/` is its working reference; start at
 `tests/conftest.py` and `tests/modules/workspace/test_init_service.py`. Run the suite with `mise run test` from the
 package root (`mise run lint` / `mise run typecheck` likewise).
+
+## Tracing
+
+Opt-in OpenTelemetry tracing — the behavior is owned by `workspace:/context/winter-cli/tracing.md`. The active span
+lives in `contextvars`, which a new thread does not inherit, so the thread rule keeps that context intact across a seam
+that would otherwise drop it; the other rules keep the SDK and span sites behind the tracing seam, put every git span at
+the one place git runs, and give every TUI worker thread a trace of its own. Each rule names what enforces it.
+
+### Thread pools
+
+Build every thread pool with `ContextThreadPoolExecutor` (`core/context_thread_pool.py`), never with
+`concurrent.futures.ThreadPoolExecutor`.
+
+- **Why.** A plain pool starts each worker with an empty context, so a task loses the span that was active when it was
+  submitted: its inner spans parent on the wrong span, and a child process it starts carries the wrong `TRACEPARENT`.
+  The helper runs each task in its own copy of the submitter's context, so the task sees the submitter's span and
+  nothing the task sets leaks back.
+- **Do.** Construct `ContextThreadPoolExecutor(max_workers=...)` where the pool is built, in place — it owns no I/O and
+  needs no seam. `GitOpsService.executor()` hands the same pool to its callers.
+- **Don't.** Import or name `ThreadPoolExecutor` anywhere in `src/` outside the helper. A bare `threading.Thread` whose
+  work should inherit the submitter's span has the same gap; copy the context into it with
+  `contextvars.copy_context().run`. A TUI thread follows the session-root rule below instead, and the tracer adapter's
+  own flusher thread is exempt.
+- **Enforced by** `tests/conventions/test_thread_pools_carry_context.py`.
+
+### OpenTelemetry stays in its adapter
+
+Import `opentelemetry` only in `core/internal/otel_command_tracer.py`.
+
+- **Why.** A process with tracing off must load no OpenTelemetry code (see
+  [Startup latency: lazy imports](#startup-latency-lazy-imports)): the container reaches the adapter lazily, and the
+  no-op adapter imports nothing from the SDK. An SDK import anywhere else loads it on every command, and ties a span
+  site to a vendor instead of the Protocol.
+- **Do.** Reach tracing through the Protocols in `core/tracing.py`. Anything that needs a new tracing capability extends
+  a Protocol and implements it in all three adapters (OTel, no-op, unavailable).
+- **Don't.** Write `import opentelemetry...` or `from opentelemetry... import ...` anywhere else in `src/`, including
+  under `TYPE_CHECKING` or inside a function.
+- **Enforced by** `tests/conventions/test_opentelemetry_only_in_its_adapter.py`.
+
+### Spans open through the injected Protocols
+
+Open a span with `IOperationTracer.operation(name, attributes)`, taking `IOperationTracer` as a required constructor
+parameter and binding it to the container's one `command_tracer` provider.
+
+- **Why.** The tracer decides the parent (the span current when the operation opens), makes the span current for its
+  body so child processes and nested spans parent on it, and turns an escaping exception into error status and the
+  exception class name. A site that builds its own span gets none of that, and a default tracer silently drops spans
+  where a construction site forgets to pass one.
+- **Do.** Depend on the narrowest tracing Protocol: `IOperationTracer` for a span site, `ISessionTracer` for the TUI.
+  Keep attribute values to names, counts, exit codes and booleans, so a span can carry its operation's identity and
+  nothing else.
+- **Don't.** Put free text on a span: an exception message, stderr, command output, argv or a config value. Don't give
+  the tracer parameter a default, and don't depend on `ICommandTracer` beyond the CLI boundary that owns the command
+  span.
+- **Enforced by** review; no mechanical check applies, because span sites are the code's own operations.
+
+### Git spans at the GitPython boundary
+
+Open a GitPython repository only in the workspace adapters (`modules/workspace/internal/`), and declare the git
+operation on every function there that opens one.
+
+- **Why.** Every git command winter runs through GitPython runs on a repository that `ReadRepoRepository`,
+  `WriteRepoRepository`, `GitPythonRepository` or `ReadWorkspaceRepository` opened. Declaring the operation at the
+  opener gives each git call its `git <operation>` span by construction, with no list of verbs to keep current. Code
+  that receives the open repository, such as a helper that takes `r`, runs inside the opener's span and needs none of
+  its own.
+- **Do.** Decorate each opener with `@GitOperationDeclaration("<subcommand>")`
+  (`modules/workspace/internal/git_operation.py`), naming the git subcommand the function performs (`fetch`,
+  `worktree add`, `status`). It opens the span through the adapter's injected `IOperationTracer`, so every adapter takes
+  that tracer as a required constructor parameter. The declaration is a callable class, not a free function, because it
+  acts on an instance's tracer and free functions are reserved for pure helpers (`./service-architecture.md`);
+  `EnvTargetDeclaration` is the precedent. The one function that opens a repository without a span, env discovery's
+  worktree listing, carries `@GitOperationExemption(reason)` instead.
+- **Attributes come from the call's own arguments.** A `FeatureWorktree` argument supplies `winter.repo` and
+  `winter.env`; a `ProjectRepository` or `StandaloneRepository` supplies `winter.repo` only. A path-taking private
+  opener takes the `repo_name` and `env` it should carry, and its public callers pass them from the domain object they
+  hold. Every method of `IGitRepository` but `list_worktrees` takes a required keyword `repo_name`, which each caller
+  passes from the repo object it holds, and all but `clone` also take a required keyword `env`, which each caller sets
+  to the env it acts in or to `None`.
+- **Don't.** Derive the env from a path: a standalone repo may be configured at a path that looks like a worktree. Open
+  `git.Repo(...)` or `git.Repo.clone_from(...)` outside `modules/workspace/internal/`, and don't give an adapter's
+  tracer a default.
+- **Enforced by** `tests/conventions/test_git_spans_at_the_gitpython_boundary.py`, which fails on a function in the
+  adapter package that opens a repository with neither declaration, on any repository opened outside that package, and
+  on a class with a declared method whose `__init__` does not assign `self._tracer`.
+
+### TUI workers open session roots
+
+Open a session root as the whole body of every TUI thread worker: each `@work(thread=True)` function in `modules/tui/`,
+and each function a raw `threading.Thread` there runs.
+
+- **Why.** A Textual thread worker runs on an executor thread that starts with an empty context, so it holds no span:
+  everything it does would trace as spans under the dashboard's long-lived session span, or as unparented fragments, and
+  a refresh could not be told from the one before it. `session_root` starts a new trace per refresh or user action,
+  linked to the session span, so a slow refresh is one short trace that shows which git call took the time. The agent
+  matrix's raw thread is the same boundary, because it is also not a pool thread and carries no context.
+- **Do.** Make the function body, after an optional docstring, one
+  `with self._session_tracer.session_root("dashboard <purpose>"):` block, taking `ISessionTracer` as a required
+  constructor parameter that the container binds to the one `command_tracer` provider. Name the purpose for what the
+  worker does (`refresh workspace`, `load repo detail`, `plugin action`); the name is a fixed phrase, never a repo, env
+  or path.
+- **Don't.** Start a thread worker without a root, put work outside the `with`, or give the screen's tracer parameter a
+  default. A one-shot command never starts a session or its background export; only the `dashboard` command does.
+- **Enforced by** `tests/conventions/test_tui_workers_open_a_session_root.py`, which fails on a decorated worker or a
+  thread target whose body is not one `session_root` block.
 
 ## Network resilience
 
