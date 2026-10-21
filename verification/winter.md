@@ -105,6 +105,9 @@ worktrees; `winter ws destroy <env>` removes them. Exit 0 plus the expected work
 path against real git remotes. **Gap**: no dedicated CI job runs this against a throwaway workspace — exercised as part
 of normal feature development.
 
+Every destructive `winter` command has its own `winter:manual` section below. Adding or changing a destructive command
+in winter-cli adds or updates its section here in the same change.
+
 ### winter:manual — destructive branch-moving verbs (ws checkout / ws reset)
 
 `winter ws checkout <env> <feature-branch>` force-attaches HEAD onto the env branch and force-moves it;
