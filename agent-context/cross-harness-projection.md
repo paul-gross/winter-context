@@ -43,7 +43,7 @@ a pinned model id. An agent with no override blocks is a complete, valid canonic
 
 The common `model` field is a **tier label** — either a built-in tier or a custom label defined in `[model_tiers]` —
 never a raw model id. The transform resolves the model for each harness through workspace configuration, the per-harness
-override block, and the effective tier table. See `workspace:/context/winter-cli/configuration/agents.md` for the
+override block, and the effective tier table. See `workspace:/context/winter/cli/configuration/agents.md` for the
 authoritative schemas, precedence, merge rules, and validation table.
 
 A resolved workspace effort projects to `effort` for Claude Code, `model_reasoning_effort` for Codex, and
@@ -60,7 +60,7 @@ The tier table is workspace-configurable via `[model_tiers]` in `.winter/config.
 workspace entry can override a built-in tier's vendor id across all agents, or define an entirely new tier label that
 agents and override maps reference by name. For the full configuration reference, merge rules, and the two validation
 timings (config-load for `[agent_model_overrides]` bare-string values, render-time for agent `model:` frontmatter), see
-`workspace:/context/winter-cli/configuration/agents.md`.
+`workspace:/context/winter/cli/configuration/agents.md`.
 
 An unknown or incomplete tier in agent `model:` frontmatter is a render-time signal: `winter ws init` warns and skips
 that agent while continuing to install the others, and `winter doctor` reports a WARN for any agent whose frontmatter

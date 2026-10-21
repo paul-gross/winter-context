@@ -2,7 +2,7 @@
 
 Four lint scripts in [`./scripts/`](./scripts/) enforce agent-facing markdown mechanically, and each follows the
 `winter lint` script contract (NDJSON findings on stdout, exit 0 — see
-`workspace:/context/winter-cli/configuration/lint.md`), so each is also registerable as a `winter lint` check. Three of
+`workspace:/context/winter/cli/configuration/lint.md`), so each is also registerable as a `winter lint` check. Three of
 them check what a reference *means*: the canonical path notation in [`./references.md`](./references.md), the reference
 integrity of the routing tables an agent navigates by, and the anchor validity of every `#fragment` link. The fourth
 checks *shape* — line width, list markers, emphasis style, fence languages — by running two external tools, and is

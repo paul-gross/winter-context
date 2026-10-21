@@ -80,7 +80,7 @@ git push                                      # from inside <env>/<repo>/, singl
 ```
 
 `winter ws push` only pushes repos that are ahead of their upstream — clean repos are skipped silently. Full reference:
-`workspace:/context/worktree-ops.md`.
+`workspace:/context/winter/worktree-ops.md`.
 
 ## Linear history — always rebase, never merge
 
@@ -195,7 +195,7 @@ winter ws fetch <env>    # refreshes remote refs and fast-forwards every project
 ```
 
 Run it against the env you just pushed from — `winter ws fetch` fast-forwards every source checkout to `origin/master`;
-the feature worktrees are left untouched. Full reference: `workspace:/context/worktree-ops.md`.
+the feature worktrees are left untouched. Full reference: `workspace:/context/winter/worktree-ops.md`.
 
 For single-repo work, the raw equivalent is:
 
@@ -231,8 +231,8 @@ link for the commands and rules.
 ## See also
 
 - `workspace:/context/project/contributing.md` — canonical commit format, `Closes #N` footer rules, push policy
-- `workspace:/context/worktree-ops.md` — full reference for `winter ws init` / `sync` / `connect` / `pull` / `push` /
-  `destroy`, including pinned-repo semantics
+- `workspace:/context/winter/worktree-ops.md` — full reference for `winter ws init` / `sync` / `connect` / `pull` /
+  `push` / `destroy`, including pinned-repo semantics
 - `../standards/linting.md`, `../standards/typechecking.md` — pre-push tools for Python repos
 - `../documentation/feature-documentation.md` — the "no undocumented feature" invariant the pre-push doc-currency check
   enforces

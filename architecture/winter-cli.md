@@ -112,7 +112,7 @@ single-worktree, and cross-env selection; a parallel flag fractures the surface 
 when an action needs an explicit target.
 
 **Declared exception:** `winter ws restack`'s positionals are an ordered chain of literal env names, never a glob — see
-`workspace:/context/winter-cli/usage/ws/patterns.md#winter-ws-restack--ordered-literal-chain-not-patterns`.
+`workspace:/context/winter/cli/usage/ws/patterns.md#winter-ws-restack--ordered-literal-chain-not-patterns`.
 
 Reserve `--flags` for *modifiers* on the selected set, not for selection itself — `--json`, `--standalone`, `--all`,
 `--exclude-pinned`, `--rebase`. The positional answers *which worktrees*; flags answer *how to act on them*.
@@ -139,8 +139,8 @@ Follow this order — each step builds on the previous:
    — inject fakes for the Protocols. See `tests/modules/workspace/internal/test_git_ops_service.py` and
    `tests/modules/workspace/internal/test_write_repo_repository.py` for the fixture pattern.
 7. **Surface the new command** in the docs so agents discover it from the docs, not from `--help`. Start at the usage
-   index `workspace:/context/winter-cli/usage/index.md` and follow it to the right per-topic file — for a `winter ws`
-   subcommand that's its own file under `workspace:/context/winter-cli/usage/ws/` (e.g. `usage/ws/checkout.md`), added
+   index `workspace:/context/winter/cli/usage/index.md` and follow it to the right per-topic file — for a `winter ws`
+   subcommand that's its own file under `workspace:/context/winter/cli/usage/ws/` (e.g. `usage/ws/checkout.md`), added
    to the `winter ws` hub's command table. If it's a whole new topic, add the file under `usage/` and a row routing to
    it from `usage/index.md`.
 
@@ -189,7 +189,7 @@ package root (`mise run lint` / `mise run typecheck` likewise).
 
 ## Tracing
 
-Opt-in OpenTelemetry tracing — the behavior is owned by `workspace:/context/winter-cli/tracing.md`. The active span
+Opt-in OpenTelemetry tracing — the behavior is owned by `workspace:/context/winter/cli/tracing.md`. The active span
 lives in `contextvars`, which a new thread does not inherit, so the thread rule keeps that context intact across a seam
 that would otherwise drop it; the other rules keep the SDK and span sites behind the tracing seam, put every git span at
 the one place git runs, and give every TUI worker thread a trace of its own. Each rule names what enforces it.
@@ -313,6 +313,6 @@ new transient class appears.
 - Conventions this codebase instantiates: `./service-architecture.md`, `./dependency-injection.md`,
   `./repository-pattern.md`, `./error-handling.md`, `./module-layout.md`.
 - Repository-pattern reference implementation: `exemplars/python/repo_pattern.py`.
-- User-facing CLI command reference (hub): `workspace:/context/winter-cli/index.md`.
-- Installation: `workspace:/context/winter-cli/setup.md`. Extension hook contract:
-  `workspace:/context/winter-cli/configuration/extensions.md#extension-hooks`.
+- User-facing CLI command reference (hub): `workspace:/context/winter/cli/index.md`.
+- Installation: `workspace:/context/winter/cli/setup.md`. Extension hook contract:
+  `workspace:/context/winter/cli/configuration/extensions.md#extension-hooks`.

@@ -55,7 +55,7 @@ extras into the customization commit (`git rebase -i <upstream-name>/master`) be
 Every file the customization commit does not own is an **inherited copy** — it lives in the upstream repo and travels
 downstream on the next *Sync flow*. The edit-time rule for these (check before editing; fix at the source repo, never
 hand-edit the downstream copy) belongs where an agent looks before touching a file, so it lives in
-`workspace:/context/workspace-layout.md` §"Inherited docs at the workspace root" rather than being restated here.
+`workspace:/context/winter/workspace-layout.md` §"Inherited docs at the workspace root" rather than being restated here.
 
 ## Sync flow
 
@@ -101,5 +101,5 @@ Project repos are governed separately — see `./feature-delivery.md`.
 - `./feature-delivery.md` — the flow for landing changes in project repos (linear history via rebase, push direct to
   `origin/master`, pre-push checks)
 - `workspace:/context/project/contributing.md` — commit format and `Closes #N` footer rules
-- `workspace:/context/worktree-ops.md` — `winter ws fetch` / `pull` / `push` reference (these operate on **project
-  repos** inside the workspace, not on the workspace repo itself)
+- `workspace:/context/winter/worktree-ops.md` — `winter ws fetch` / `pull` / `push` reference (these operate on
+  **project repos** inside the workspace, not on the workspace repo itself)

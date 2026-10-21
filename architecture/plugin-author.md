@@ -88,7 +88,7 @@ A `TuiAction.key` is the action's **default** binding only: users can remap it f
 `[keybindings.bindings]` via the action id `plugin.<name>` (where `<name>` is your `TuiAction.name`), and may even bind
 it to a multi-key chord. Pick a sensible single-key default and keep `name` stable — it is the user-facing config id.
 Set `key` as a raw Textual key token (`"e"`, `"ctrl+e"`, `"enter"`); the config-override grammar is documented in
-`workspace:/context/winter-cli/usage/dashboard.md#keybindings`.
+`workspace:/context/winter/cli/usage/dashboard.md#keybindings`.
 
 ## Decorator Protocols
 
@@ -163,7 +163,7 @@ key in each is unambiguous; winter dispatches to whichever area is focused. Two 
 when their declared areas **overlap** — disjoint areas (e.g. one `standalone_repository`, one `feature_worktree`)
 coexist on the same key, and a single multi-scope action never collides with itself. A plugin key also collides with any
 **built-in** action bound to the same key, regardless of area — this is the more common real-world conflict when picking
-a default `key`, so consult the built-in action table in `workspace:/context/winter-cli/usage/dashboard.md#keybindings`
+a default `key`, so consult the built-in action table in `workspace:/context/winter/cli/usage/dashboard.md#keybindings`
 before committing to a default. The workspace screen routes a multi-scope action to the **focused area** (standalone
 panel vs. feature grid); the detail screens (worktree detail, standalone detail) route to the **most-specific declared
 scope** they can host — so a `[feature_worktree, standalone_repository]` action fires with a `FeatureWorktreeContext` on

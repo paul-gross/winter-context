@@ -27,7 +27,7 @@ Out of scope — these belong elsewhere:
   anyone modifying the extension.
 - **Doctor probe internals** (which probes the script emits, the NDJSON shape, exit-code semantics). The user reads
   `winter doctor`'s rendered output, not the probe internals. The contract lives in
-  `workspace:/context/winter-cli/configuration/doctor.md#probe-output-contract`.
+  `workspace:/context/winter/cli/configuration/doctor.md#probe-output-contract`.
 - **Manifest schema, plugin internals, hook-script implementation details.** All behind-the-scenes.
 - **Installation steps.** Those belong in `README.md` (see `winter-context:/documentation/writing-readme.md`).
 - **Setup walkthroughs.** Those belong in `context/` (e.g. `context/workflow-setup.md`) and are referenced *from*
