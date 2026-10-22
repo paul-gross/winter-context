@@ -113,7 +113,8 @@ semantic lints deliberately ignore is gated too:
 **The two config files are the opt-in.** A repo joins the gate by committing them; a repo carrying neither is silently
 out of scope, and a repo may adopt one tool without the other. That is what lets the check ship from here and still
 travel to a consumer that has not adopted the style. The ecosystem repos carrying both today: `winter`, `winter-canon`,
-`winter-docs`, `winter-context`, `winter-service-docker`, `winter-service-tmux`, `winter-workflow`.
+`winter-docs`, `winter-context`, `winter-service-docker`, `winter-service-process-compose`, `winter-service-tmux`,
+`winter-workflow`.
 
 Both tools honor `.gitignore`, so vendored trees (`node_modules/`, `.venv/`, `dist/`) need no exclusion. What *does*
 need excluding is a deliberate-violation fixture directory — reflowing one rewrites the shapes its assertions pin — so
