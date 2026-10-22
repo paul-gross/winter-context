@@ -36,7 +36,8 @@ Two kinds of repository compose into a winter workspace, and the docs must not b
 
 **Consumable extension.** A *generic, opinion-neutral* capability any workspace installs to gain function — service
 orchestration, issue tooling, a backlog model. The reader wants the function and adopts it without buying into anyone's
-methodology. Current consumables: `winter-product`, `winter-service-tmux`, `winter-service-docker`, `winter-github`.
+methodology. Current consumables: `winter-product`, `winter-service-tmux`, `winter-service-docker`,
+`winter-service-process-compose`, `winter-github`.
 
 **Example (reference implementation).** The maintainer's own *opinionated* implementation of a swappable concern — the
 agentic workflow, the conventions, the workspace itself. It installs and runs like any extension and is fully usable

@@ -34,6 +34,7 @@ requires = [
     "winter-plugin-api",
     "winter-product",
     "winter-service-docker",
+    "winter-service-process-compose",
     "winter-service-tmux",
     "winter-test-service",
     "winter-workflow",
