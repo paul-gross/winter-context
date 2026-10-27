@@ -59,10 +59,28 @@ Verification that runs as a single command — exit 0 is the pass signal unless 
 | cli-probe:restack-plan                   | `winter ws restack <chain> <base> --dry-run --json` — resolves and prints the restack plan (every link, each participating repo's boundary sha and source) without rebasing anything; `RestackHandler.run` never reaches the execute service on a dry run. Read-only by construction, so — unlike every other `ws restack` scenario in `winter:manual` above — it's safe to point at a live workspace via `tool:winter-core-override`. **Exception to this table's exit-0-is-pass default:** a refused chain exits 1 even though `--dry-run` did exactly what this probe promises — previewed without mutating; treat the presence of `refusals` in the printed JSON, not the exit code alone, as this probe's pass signal.                                                                                                                                                                                                                                 |
 | cli-probe:service-describe               | `winter service describe` — the bound provider reports its declared service catalog; confirms the service manifest parses and services are discoverable.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                    |
 
+For `winter:unit-test`, GitPython's real-worktree fixtures require absolute worktree links, and real-git fixtures must
+not open editors or signing prompts. On hosts with relative worktrees or signing enabled, use process-local overrides
+(without changing any Git config file):
+
+```bash
+GIT_CONFIG_COUNT=3 \
+GIT_CONFIG_KEY_0=worktree.useRelativePaths GIT_CONFIG_VALUE_0=false \
+GIT_CONFIG_KEY_1=tag.gpgSign GIT_CONFIG_VALUE_1=false \
+GIT_CONFIG_KEY_2=commit.gpgSign GIT_CONFIG_VALUE_2=false \
+GIT_EDITOR=true GIT_TERMINAL_PROMPT=0 uv run pytest
+```
+
 ## Manual testing
 
 Verification no single command performs — it needs a running stack, spans many invocations, or rests on judgment. Any of
 these can be pointed at in-progress code with the override Tools below.
+
+### winter:manual-doc-accuracy — changed documentation claims
+
+Compare each changed canonical and public documentation claim with the implementation and passing behavioral evidence.
+Record each claim, its evidence, and a pass/fail verdict. Pass only when no changed claim is unsupported or contradicted
+and the public page references the canonical detail.
 
 ### winter-context:manual-shared-core — cold shared-core reach and behavior
 
