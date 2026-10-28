@@ -4,8 +4,8 @@
 
 - One tool: `pyright`. No `mypy`, no running both checkers.
 - Configured under `[tool.pyright]` in `pyproject.toml`. `pyright` is in the `dev` dependency group.
-- One `mise` task exposes it: `mise run typecheck`.
-- Run before pushing, alongside `mise run lint` and `mise run format`.
+- One command exposes it: `uv run pyright`.
+- Run before pushing, alongside `uv run ruff check .` and `uv run ruff format .`.
 
 ## Why
 
@@ -22,7 +22,7 @@ free.
 Before pushing any Python change:
 
 ```bash
-mise run typecheck   # exits 0 on a clean tree
+uv run pyright   # exits 0 on a clean tree
 ```
 
 Treat type errors the same as lint errors: fix them, then re-run until clean. Prefer fixing the underlying type
@@ -43,7 +43,7 @@ dev = [
 
 [tool.pyright]
 include = ["src", "tests"]
-pythonVersion = "3.11"           # match `requires-python`
+pythonVersion = "3.11"           # match the lowest interpreter the code runs on
 typeCheckingMode = "standard"
 reportMissingTypeStubs = false
 ```
@@ -54,14 +54,6 @@ still catches the high-value bugs (wrong arg types, `None` deref, incompatible o
 
 `reportMissingTypeStubs = false` silences the per-package "no type stubs" notice for third-party libraries that don't
 ship them. Genuine import resolution failures still surface as `reportMissingImports`.
-
-Canonical `mise.toml` task:
-
-```toml
-[tasks.typecheck]
-description = "Type-check with pyright"
-run = "uv run pyright"
-```
 
 ## Common fix patterns
 

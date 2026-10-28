@@ -4,7 +4,7 @@
 
 - One tool: `ruff` for **both** linting and formatting. No separate `black`, `isort`, `flake8`, etc.
 - Configured under `[tool.ruff]` in `pyproject.toml`. `ruff` is in the `dev` dependency group.
-- Two `mise` tasks expose it: `mise run lint` and `mise run format`.
+- Two commands expose it: `uv run ruff check .` and `uv run ruff format .`.
 - Run both before pushing.
 
 ## Why
@@ -21,12 +21,12 @@ no tool-version skew.
 Before pushing any Python change:
 
 ```bash
-mise run format    # rewrites in place
-mise run lint      # exits 0 on a clean tree
+uv run ruff format .        # rewrites in place
+uv run ruff check .         # exits 0 on a clean tree
 ```
 
 If `lint` reports issues, fix them and re-run until clean. Many violations are autofixable — pass `--fix` directly:
-`uv run ruff check --fix .` (no `mise` wrapper for this one-shot mode; it's the same `ruff` binary).
+`uv run ruff check --fix .`.
 
 ## Configuration
 
@@ -55,18 +55,6 @@ select = ["E", "F", "I", "UP", "B", "C4", "SIM", "RUF"]
 
 Rule families: pycodestyle errors (`E`), pyflakes (`F`), isort (`I`), pyupgrade (`UP`), flake8-bugbear (`B`),
 flake8-comprehensions (`C4`), flake8-simplify (`SIM`), Ruff-native (`RUF`).
-
-Canonical `mise.toml` tasks:
-
-```toml
-[tasks.lint]
-description = "Lint with ruff"
-run = "uv run ruff check ."
-
-[tasks.format]
-description = "Format with ruff"
-run = "uv run ruff format ."
-```
 
 ## Per-file ignores
 

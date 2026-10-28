@@ -143,9 +143,9 @@ No CI runs against `master`. Anything not run locally before push lands silently
 For Python repos, run all three before pushing:
 
 ```bash
-mise run format     # rewrites in place
-mise run lint       # exits 0 on a clean tree
-mise run typecheck  # exits 0 on a clean tree
+uv run ruff format .        # rewrites in place
+uv run ruff check .         # exits 0 on a clean tree
+uv run pyright              # exits 0 on a clean tree
 ```
 
 Rules and canonical config: `../standards/linting.md` (ruff) and `../standards/typechecking.md` (pyright). Other

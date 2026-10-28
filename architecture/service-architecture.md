@@ -78,7 +78,7 @@ def sync(repo: ProjectRepository, env: FeatureWorktree) -> None:
 
 ## Enforcement
 
-In winter-cli, this rule is checked at `mise run test` time by
+In winter-cli, this rule is checked at `uv run pytest` time by
 `winter:/tools/winter-cli/tests/conventions/test_service_based_behavior.py`. It flags the tractable, false-positive-free
 signal: a **module-level function whose parameter is annotated with an `I`-prefixed Protocol** — the form every injected
 collaborator takes (DI consumers depend on the Protocol seam, and the `I`-prefix is reserved for Protocols by the naming
