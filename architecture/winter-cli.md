@@ -147,18 +147,30 @@ Follow this order — each step builds on the previous:
 ## Startup latency: lazy imports
 
 `winter` is invoked per-command (e.g. the editor's worktrees picker shells out to `winter ws worktrees --json`), so
-import cost on the hot path is felt directly. Two seams keep the cold imports off the `winter ws` path; respect both
-when adding commands.
+import cost on the hot path is felt directly. Each invocation does only the work its command needs. Respect these rules
+when adding commands or providers.
 
 - **`LazyGroup` (cli.py).** The root group is a `LazyGroup` whose `_LAZY_SUBCOMMANDS` maps each top-level command name
-  to a `"module:attribute"` reference, imported only when that command is dispatched (`--help` still lists them all
-  without importing). **Adding a new top-level command** (a sibling of `ws` / `doctor` / `dashboard`, not a
-  `winter ws foo` subcommand) means adding an entry here — don't `add_command` an eagerly-imported object.
-- **`_lazy()` providers (container.py).** The DI `Container` is built on *every* invocation, so a module-top `import` of
-  a command-specific tree (the `doctor`, `lint`, and `tui`/textual trees) would load it for `winter ws` too. Those
-  providers use `providers.Factory(_lazy("module:Class"), ...)`, which imports the class on first resolution instead.
-  **When binding a provider whose class drags in a heavy tree only one command needs**, wrap it in `_lazy(...)` rather
-  than importing at the top; the workspace/core seams that `ws` itself needs stay eagerly imported.
+  to a `LazySubcommand`: a `"module:attribute"` target, imported only when that command is dispatched, and the command's
+  first help paragraph. `--help` renders the command listing from that text with click's own short-help truncation, so
+  it lists every command without importing any. **Adding a new top-level command** (a sibling of `ws` / `doctor` /
+  `dashboard`, not a `winter ws foo` subcommand) means adding an entry with its short help here — don't `add_command` an
+  eagerly-imported object.
+- **The container is built on first need.** `CliContext` holds a `LazyContainer`; the first resolution, normally the
+  tracer lookup as `LazyGroup` opens the command span, builds the one `Container` and applies the boundary's tracing
+  settings. `winter --version`, `--help`, and bare `winter` never build it. The CLI boundary exports the tracer only
+  when a container was built.
+- **`cli.py`'s module top stays light.** It imports click and the stdlib-only core modules (`core.tracing`,
+  `core.config_file`, the no-op tracer, `cli_context`) and nothing heavier. The `RepoError` handler, the
+  `dependency_injector` override, and the container each import on the path that needs them. The SSH keepalive lives in
+  the gitpython-free `core/ssh_keepalives.py`.
+- **Every provider is `_lazy()` (container.py).** `providers.Factory(_lazy("module:Class"), ...)` imports the class on
+  first resolution, so importing `container.py` imports no `winter_cli.modules.*` service module. **Keep the provider
+  typed** with a class-body annotation — `x: providers.Factory[Class] = ...` — and import `Class` under `TYPE_CHECKING`,
+  so the type check still covers every `container.x()` call site. `tests/test_container.py` resolves every provider (or
+  imports its `_lazy` target), so a wrong path fails there.
+- **Config models defer their schemas.** Every pydantic `BaseModel` in `config/models.py` sets `defer_build=True`, so
+  importing the models costs class creation only; a schema builds on first validation.
 
 `cli.py` also sets `sys.pycache_prefix` (a per-user cache dir) instead of `sys.dont_write_bytecode = True`, so the core
 package keeps a warm `.pyc` cache across runs while plugin extension source trees stay free of `__pycache__/`. The
