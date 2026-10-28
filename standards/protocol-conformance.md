@@ -3,8 +3,7 @@
 When a Protocol seam is wired through a DI container, Pyright can lose sight of the contract. The `dependency-injector`
 accessors used in this codebase — `provided.<method>.call(...)`, `Provide[...]`, etc. — return `Any`, which launders the
 Protocol type past every consumer. Drift in an adapter's signature (renamed method, changed arity, swapped kwarg, wrong
-return type) then sails through `mise run typecheck` because nothing structurally compares the adapter against its
-Protocol.
+return type) then sails through `uv run pyright` because nothing structurally compares the adapter against its Protocol.
 
 ## Rule
 
@@ -36,8 +35,7 @@ error: Type "WriteFooRepository" is not assignable to return type "IWriteFooRepo
     "save_thing" is not present (reportReturnType)
 ```
 
-Zero runtime cost — Pyright catches the drift, `mise run typecheck` surfaces it, the build stops before drifted code
-lands.
+Zero runtime cost — Pyright catches the drift, `uv run pyright` surfaces it, the build stops before drifted code lands.
 
 ## Place the sentinel next to the adapter, not the Protocol
 

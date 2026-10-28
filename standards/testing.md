@@ -9,7 +9,7 @@
   for `unittest.mock.MagicMock` only at the orchestration edge.
 - **Assertions match the layer**: services assert against event vocabularies on injected reporters; handlers assert exit
   codes and rendered output; adapters assert real I/O effects.
-- Run `pytest` (typically `mise run test`) before pushing, alongside `mise run lint` and `mise run typecheck`.
+- Run `pytest` (typically `uv run pytest`) before pushing, alongside `uv run ruff check .` and `uv run pyright`.
 
 ## Why
 
@@ -157,7 +157,7 @@ file, lift it to `tests/<feature>/conftest.py`.
 Some Python conventions describe AST-level patterns that `ruff`, `pyright`, and `import-linter` can't reach — Protocol
 naming (`I`-prefix), the no-whole-Config-injection rule, the no-catch-log-rethrow pattern, the service-based-behavior
 rule. Code review and the `cold-reviewer` agent catch them probabilistically; promoting each rule to a small pytest file
-under `tests/conventions/` makes the check deterministic and runs it alongside the rest of `mise run test`.
+under `tests/conventions/` makes the check deterministic and runs it alongside the rest of `uv run pytest`.
 
 ### Layout
 

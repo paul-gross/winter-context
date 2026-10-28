@@ -184,8 +184,8 @@ precedent.
 
 Full testing conventions — directory layout, conftest scoping, fake-vs-mock guidance, and per-layer assertion patterns —
 live in `../standards/testing.md`. The winter-cli tree under `tests/` is its working reference; start at
-`tests/conftest.py` and `tests/modules/workspace/test_init_service.py`. Run the suite with `mise run test` from the
-package root (`mise run lint` / `mise run typecheck` likewise).
+`tests/conftest.py` and `tests/modules/workspace/test_init_service.py`. Run the suite with `uv run pytest` from the
+package root (`uv run ruff check .` / `uv run pyright` likewise).
 
 ## Tracing
 
