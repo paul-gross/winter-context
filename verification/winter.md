@@ -92,6 +92,25 @@ Compare each changed canonical and public documentation claim with the implement
 Record each claim, its evidence, and a pass/fail verdict. Pass only when no changed claim is unsupported or contradicted
 and the public page references the canonical detail.
 
+### winter:manual-startup-latency — CLI startup time
+
+Run from the workspace root, against the env's shim **file** (not the installed `winter`), with the env's source
+selected by `--winter=<env>/winter`:
+
+```bash
+SHIM=<env>/winter/tools/winter-cli/bin/winter
+t() { s=$EPOCHREALTIME; "$SHIM" --winter=./<env>/winter "$@" >/dev/null 2>&1; e=$EPOCHREALTIME; echo $(( (${e/[.,]/} - ${s/[.,]/}) / 1000 )); }
+for cmd in "--version" "ws status <env>"; do
+  t $cmd >/dev/null   # warm-up
+  for _ in $(seq 11); do t $cmd; done | sort -n | sed -n 6p   # median, ms
+done
+cat /proc/loadavg; nproc
+```
+
+Record the host load average and core count beside the medians. A run whose load average exceeds the core count is not a
+valid measurement; repeat it on a quieter host. Pass: warm `--version` has a median of at most 150 ms, and `ws status`
+is below the baseline recorded before the change.
+
 ### winter-context:manual-shared-core — cold shared-core reach and behavior
 
 From a spawning session at the configured workspace root, give a fresh agent with no session history this scope
@@ -701,24 +720,27 @@ Checks:
   Pass: all 22 runs exit 0 with empty stderr, and the hanging median minus the responsive median is at most 150 ms (the
   100 ms cap plus 50 ms).
 
-- **Shim without `EPOCHREALTIME`.** A stub `uv` first on `PATH` prints its environment and exits, so the shim runs to
-  its `exec` and nothing else. Run it under the host bash, then under bash 4.4, which has no `EPOCHREALTIME`:
+- **Shim without `EPOCHREALTIME`.** A current venv is seeded with a stub `winter` entrypoint that prints its
+  environment, so the shim runs to its `exec` and nothing else — `uv` is never reached. Run it under the host bash, then
+  under bash 4.4, which has no `EPOCHREALTIME`:
 
   ```bash
-  mkdir -p "$SCRATCH/nm/ws/.winter" "$SCRATCH/nm/ws/tools/winter-cli" "$SCRATCH/nm/stub"
-  touch "$SCRATCH/nm/ws/.winter/config.toml"
-  printf '#!/bin/sh\nenv\n' > "$SCRATCH/nm/stub/uv" && chmod +x "$SCRATCH/nm/stub/uv"
+  mkdir -p "$SCRATCH/nm/ws/.winter" "$SCRATCH/nm/ws/tools/winter-cli/.venv/bin"
+  touch "$SCRATCH/nm/ws/.winter/config.toml" "$SCRATCH/nm/ws/tools/winter-cli/"{uv.lock,pyproject.toml}
+  printf '#!/bin/sh\nenv\n' > "$SCRATCH/nm/ws/tools/winter-cli/.venv/bin/winter"
+  chmod +x "$SCRATCH/nm/ws/tools/winter-cli/.venv/bin/winter"
+  sleep 1; touch "$SCRATCH/nm/ws/tools/winter-cli/.venv/.winter-sync-stamp"   # newer than the inputs
   SHIM_ABS=$(realpath "$SHIM")
 
   # host bash (5 or newer)
-  (cd "$SCRATCH/nm/ws" && env -u WINTER_LAUNCH_TIME PATH="$SCRATCH/nm/stub:$PATH" bash "$SHIM_ABS" ws status) \
+  (cd "$SCRATCH/nm/ws" && env -u WINTER_LAUNCH_TIME bash "$SHIM_ABS" ws status) \
     >"$SCRATCH/host.out" 2>"$SCRATCH/host.err"; echo "host exit $?"
   grep -E '^(WINTER_LAUNCH_TIME|WINTER_INVOCATION_CWD)=' "$SCRATCH/host.out"; cat "$SCRATCH/host.err"
 
   # bash 4.4: mount the shim and the minimal workspace
   docker run --rm bash:4.4 bash -c 'echo "EPOCHREALTIME=${EPOCHREALTIME:-unset}"'     # unset
   docker run --rm -v "$SCRATCH/nm:/scr" -v "$SHIM_ABS:/scr/shim:ro" -w /scr/ws \
-    -e PATH=/scr/stub:/usr/local/bin:/usr/bin:/bin bash:4.4 bash /scr/shim ws status \
+    -e PATH=/usr/local/bin:/usr/bin:/bin bash:4.4 bash /scr/shim ws status \
     >"$SCRATCH/old.out" 2>"$SCRATCH/old.err"; echo "bash 4.4 exit $?"
   grep -E '^(WINTER_LAUNCH_TIME|WINTER_INVOCATION_CWD)=' "$SCRATCH/old.out"; cat "$SCRATCH/old.err"
   ```
