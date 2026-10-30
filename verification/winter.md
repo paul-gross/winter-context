@@ -461,8 +461,9 @@ export JAEGER=http://127.0.0.1:$QUERY_PORT   # the read-back helpers below query
 echo "ports: otlp=$OTLP_PORT query=$QUERY_PORT hang=$HANG_PORT"
 
 # A local Jaeger. Tracing is switched on only once this Jaeger answers, so no span reaches any other collector.
-if [ -n "$HANG_PORT" ] \
-  && docker run --rm -d --name winter-jaeger -p "127.0.0.1:$QUERY_PORT:16686" -p "127.0.0.1:$OTLP_PORT:4318" \
+if [ -z "$HANG_PORT" ]; then
+  echo "SETUP FAILED: no free host ports were picked" >&2
+elif docker run --rm -d --name winter-jaeger -p "127.0.0.1:$QUERY_PORT:16686" -p "127.0.0.1:$OTLP_PORT:4318" \
     jaegertracing/jaeger:latest; then
   for _ in $(seq 60); do curl -sf "$JAEGER/api/v3/services" >/dev/null && break; sleep 1; done
   curl -sf "$JAEGER/api/v3/services" >/dev/null && export WINTER_OTEL_EXPORTER_OTLP_ENDPOINT=$RESPONSIVE \
