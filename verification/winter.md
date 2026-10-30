@@ -435,6 +435,10 @@ pressed, and every provision and service step inside a scratch workspace.
 Setup:
 
 ```bash
+# First, drop the tracing this shell arrived with: a fleet runner exports these so a worker's own winter calls trace
+# into its lease, and nothing this method runs, aborted or not, may send a span to that collector.
+unset "${!WINTER_OTEL_@}" "${!OTEL_EXPORTER_OTLP_@}"
+
 SHIM=./alpha/winter/tools/winter-cli/bin/winter
 SCRATCH=$(mktemp -d)
 
@@ -446,16 +450,18 @@ fresh_parent() {
   export TRACEPARENT=00-$TRACE_ID-$CALLER_SPAN-01
 }
 
-# Host ports: Jaeger's OTLP/HTTP receiver, its query API and UI, and the hanging endpoint. A local collector often
-# already holds 4318; when the check below names a port in use, set a free one here and rerun the setup from this line.
-OTLP_PORT=4318 QUERY_PORT=16686 HANG_PORT=4319
+# Host ports, three distinct ones free right now: Jaeger's OTLP/HTTP receiver, its query API and UI, and the hanging
+# endpoint. Picked rather than fixed, since a local collector often already holds Jaeger's defaults 4318 and 16686.
+read -r OTLP_PORT QUERY_PORT HANG_PORT < <(python3 -c 'import socket
+socks = [socket.socket() for _ in range(3)]
+for s in socks: s.bind(("127.0.0.1", 0))
+print(*(s.getsockname()[1] for s in socks))')
 RESPONSIVE=http://127.0.0.1:$OTLP_PORT HANGING=http://127.0.0.1:$HANG_PORT
-export JAEGER=http://127.0.0.1:$QUERY_PORT   # the read-back helpers below query Jaeger here
-port_free() { python3 -c 'import socket, sys; sys.exit(socket.socket().connect_ex(("127.0.0.1", int(sys.argv[1]))) == 0)' "$1" \
-  || { echo "SETUP FAILED: port $1 is in use" >&2; return 1; }; }
+export JAEGER=http://127.0.0.1:$QUERY_PORT   # the read-back helpers below query Jaeger here; open it for the UI
+echo "ports: otlp=$OTLP_PORT query=$QUERY_PORT hang=$HANG_PORT"
 
 # A local Jaeger. Tracing is switched on only once this Jaeger answers, so no span reaches any other collector.
-if port_free "$OTLP_PORT" && port_free "$QUERY_PORT" && port_free "$HANG_PORT" \
+if [ -n "$HANG_PORT" ] \
   && docker run --rm -d --name winter-jaeger -p "127.0.0.1:$QUERY_PORT:16686" -p "127.0.0.1:$OTLP_PORT:4318" \
     jaegertracing/jaeger:latest; then
   for _ in $(seq 60); do curl -sf "$JAEGER/api/v3/services" >/dev/null && break; sleep 1; done
